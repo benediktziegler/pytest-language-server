@@ -11,7 +11,7 @@ def my_fixture():
 async def test_something(my_fixture):
     assert my_fixture == 42
 "#;
-    
+
     match parser::parse(code, parser::Mode::Module, "test.py") {
         Ok(ast) => {
             println!("Parsed successfully!");

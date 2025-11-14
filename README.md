@@ -1,133 +1,226 @@
-# pytest-lsp - Language Server for pytest fixtures
+# pytest-language-server 🔥
 
-A Language Server Protocol (LSP) implementation in Rust that provides IDE support for pytest fixtures.
+> **Shamelessly vibed into existence** 🤖✨
+>
+> This entire LSP implementation was built from scratch in a single AI-assisted coding session.
+> No template. No boilerplate. Just pure vibes and Rust. That's right - a complete, working
+> Language Server Protocol implementation for pytest, vibed into reality through the power of
+> modern AI tooling. This is what's possible when you stop overthinking and start vibing.
+
+A blazingly fast Language Server Protocol (LSP) implementation for pytest, built with Rust.
 
 ## Features
 
-- **Fixture Detection**: Automatically finds fixture definitions in `conftest.py` files
-- **Go-to-Definition**: Jump from fixture usage to definition
-- **Workspace Scanning**: Discovers all test files and conftest files in your project
-- **Real-time Updates**: Analyzes files as you edit them
+### 🎯 Go to Definition
+Jump directly to fixture definitions from anywhere they're used:
+- Local fixtures in the same file
+- Fixtures in `conftest.py` files
+- Third-party fixtures from pytest plugins (pytest-mock, pytest-asyncio, etc.)
+- Respects pytest's fixture shadowing/priority rules
 
-## How It Works
+### 🔍 Find References
+Find all usages of a fixture across your entire test suite:
+- Works from fixture definitions or usage sites
+- Character-position aware (distinguishes between fixture name and parameters)
+- Shows references in all test files
 
-1. **Fixture Definitions**: The LSP scans for functions decorated with `@pytest.fixture` or `@fixture` in:
-   - `conftest.py` files
-   - Test files (`test_*.py` and `*_test.py`)
-2. **Fixture Usage**: Detects fixture usage by analyzing parameters in test functions (functions starting with `test_`)
-3. **Go-to-Definition**: When you request go-to-definition on a fixture parameter, it finds the fixture definition in:
-   - The same file (if defined there)
-   - The closest `conftest.py` file in the directory hierarchy
+### 📚 Hover Documentation
+View fixture information on hover:
+- Fixture signature
+- Source file location
+- Docstring (with proper formatting and dedenting)
+- Markdown support in docstrings
 
-## Usage with Neovim
+### ⚡️ Performance
+Built with Rust for maximum performance:
+- Fast workspace scanning with concurrent file processing
+- Efficient AST parsing using rustpython-parser
+- Lock-free data structures with DashMap
+- Minimal memory footprint
 
-Add this to your Neovim config:
+## Installation
 
-```lua
-local lspconfig = require('lspconfig')
-local configs = require('lspconfig.configs')
-
-if not configs.pytest_lsp then
-  configs.pytest_lsp = {
-    default_config = {
-      cmd = {'/Users/bellini/dev/pytest-lsp/target/release/pytest-lsp'},
-      filetypes = {'python'},
-      root_dir = lspconfig.util.root_pattern('.git', 'pyproject.toml', 'setup.py'),
-      settings = {},
-    },
-  }
-end
-
-lspconfig.pytest_lsp.setup{}
-```
-
-## Debugging / Logging
-
-The LSP server logs detailed information to `~/.pytest_lsp.log`. You can monitor this in real-time:
+### From PyPI (Recommended)
 
 ```bash
-tail -f ~/.pytest_lsp.log
+pip install pytest-language-server
 ```
 
-The log includes:
-- Workspace scanning progress
-- Files being analyzed
-- Fixtures found (definitions and usages)
-- Go-to-definition requests and results
-- Any errors or warnings
+### From Crates.io
 
-This is extremely helpful for debugging why go-to-definition might not be working.
+```bash
+cargo install pytest-language-server
+```
 
-## Building
+### From Source
+
+```bash
+git clone https://github.com/patrick91/pytest-language-server
+cd pytest-language-server
+cargo build --release
+```
+
+The binary will be at `target/release/pytest-language-server`.
+
+## Setup
+
+### Neovim (with nvim-lspconfig)
+
+```lua
+require'lspconfig'.pytest_lsp.setup{
+  cmd = { "pytest-language-server" },
+  filetypes = { "python" },
+  root_dir = function(fname)
+    return require'lspconfig'.util.root_pattern('pyproject.toml', 'setup.py', 'setup.cfg', 'pytest.ini')(fname)
+  end,
+}
+```
+
+### VS Code
+
+Install the extension from the marketplace (coming soon) or configure manually:
+
+```json
+{
+  "pytest-language-server.enable": true,
+  "pytest-language-server.path": "pytest-language-server"
+}
+```
+
+### Other Editors
+
+Any editor with LSP support can use pytest-language-server. Configure it to run the `pytest-language-server` command.
+
+## Configuration
+
+### Logging
+
+Control log verbosity with the `RUST_LOG` environment variable:
+
+```bash
+# Minimal logging (default)
+RUST_LOG=warn pytest-language-server
+
+# Info level
+RUST_LOG=info pytest-language-server
+
+# Debug level (verbose)
+RUST_LOG=debug pytest-language-server
+
+# Trace level (very verbose)
+RUST_LOG=trace pytest-language-server
+```
+
+Logs are written to stderr, so they won't interfere with LSP communication.
+
+### Virtual Environment Detection
+
+The server automatically detects your Python virtual environment:
+1. Checks for `.venv/`, `venv/`, or `env/` in your project root
+2. Falls back to `$VIRTUAL_ENV` environment variable
+3. Scans third-party pytest plugins for fixtures
+
+## Supported Fixture Patterns
+
+### Decorator Style
+```python
+@pytest.fixture
+def my_fixture():
+    """Fixture docstring."""
+    return 42
+```
+
+### Assignment Style (pytest-mock)
+```python
+mocker = pytest.fixture()(_mocker)
+```
+
+### Async Fixtures
+```python
+@pytest.fixture
+async def async_fixture():
+    return await some_async_operation()
+```
+
+### Fixture Dependencies
+```python
+@pytest.fixture
+def fixture_a():
+    return "a"
+
+@pytest.fixture
+def fixture_b(fixture_a):  # Go to definition works on fixture_a
+    return fixture_a + "b"
+```
+
+## Fixture Priority Rules
+
+pytest-language-server correctly implements pytest's fixture shadowing rules:
+1. **Same file**: Fixtures defined in the same file have highest priority
+2. **Closest conftest.py**: Searches parent directories for conftest.py files
+3. **Virtual environment**: Third-party plugin fixtures
+
+## Supported Third-Party Fixtures
+
+Automatically discovers fixtures from popular pytest plugins:
+- **pytest-mock**: `mocker`, `class_mocker`
+- **pytest-asyncio**: `event_loop`
+- **pytest-django**: Database fixtures
+- **pytest-cov**: Coverage fixtures
+- And any other pytest plugin in your environment
+
+## Architecture
+
+- **Language**: Rust 🦀
+- **LSP Framework**: tower-lsp
+- **Parser**: rustpython-parser
+- **Concurrency**: tokio async runtime
+- **Data Structures**: DashMap for lock-free concurrent access
+
+## Development
+
+### Prerequisites
+
+- Rust 1.70+ (2021 edition)
+- Python 3.8+ (for testing)
+
+### Building
 
 ```bash
 cargo build --release
 ```
 
-The binary will be at `target/release/pytest-lsp`
-
-## Testing
-
-The project includes comprehensive unit tests:
+### Running Tests
 
 ```bash
 cargo test
 ```
 
-### Test Coverage
+### Logging During Development
 
-- ✅ Fixture definition detection (various decorator styles)
-- ✅ Fixture usage detection (test function parameters)
-- ✅ Go-to-definition functionality
-- ✅ Multiple decorator variations (@pytest.fixture, @fixture, with/without parentheses)
-
-## Example
-
-Given these files:
-
-**conftest.py**:
-```python
-import pytest
-
-@pytest.fixture
-def sample_fixture():
-    return 42
+```bash
+RUST_LOG=debug cargo run
 ```
 
-**test_example.py**:
-```python
-def test_something(sample_fixture):
-    assert sample_fixture == 42
-```
+## Contributing
 
-When you place your cursor on `sample_fixture` in the test function and press `gd` (go-to-definition), it will jump to the fixture definition in `conftest.py`.
+Contributions are welcome! Please feel free to submit a Pull Request.
 
-## Architecture
+## License
 
-- **Parser**: Uses `rustpython-parser` for proper Python AST parsing
-- **Storage**: Uses `DashMap` for thread-safe concurrent access to fixture definitions and usages
-- **LSP Framework**: Built on `tower-lsp` for LSP protocol handling
-- **File Discovery**: Uses `walkdir` for efficient workspace scanning
+MIT License - see LICENSE file for details.
 
-## Project Structure
+## Acknowledgments
 
-```
-src/
-├── main.rs       # LSP server implementation
-└── fixtures.rs   # Fixture detection and go-to-definition logic
-```
+Built with:
+- [tower-lsp](https://github.com/ebkalderon/tower-lsp) - LSP framework
+- [rustpython-parser](https://github.com/RustPython/RustPython) - Python AST parsing
+- [tokio](https://tokio.rs/) - Async runtime
 
-## Current Limitations
+Special thanks to the pytest team for creating such an amazing testing framework.
 
-- Does not support fixture scopes or complex fixture dependencies
-- Does not provide hover information or completion yet
-- Does not detect fixtures with custom decorators
+---
 
-## Future Enhancements
+**Made with ❤️ and Rust. Shamelessly vibed into existence. Blazingly fast. 🔥**
 
-- Hover information showing fixture docstrings and return types
-- Auto-completion for available fixtures in function parameters
-- Show fixture scope (function, class, module, session)
-- Fixture dependency graph visualization
-- Support for parametrized fixtures
-- Find all references to a fixture
+*When you need a pytest LSP and the vibes are just right.* ✨

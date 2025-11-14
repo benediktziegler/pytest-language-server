@@ -1,0 +1,47 @@
+[build-system]
+requires = ["maturin>=1.10,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "pytest-language-server"
+version = "0.1.0"
+description = "A blazingly fast Language Server Protocol implementation for pytest"
+authors = [{name = "Patrick Arminio", email = "patrick.arminio@gmail.com"}]
+readme = "README.md"
+license = {text = "MIT"}
+keywords = ["pytest", "lsp", "language-server", "testing"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Rust",
+    "Topic :: Software Development :: Testing",
+    "Topic :: Software Development :: Libraries",
+]
+requires-python = ">=3.8"
+
+[project.urls]
+Homepage = "https://github.com/patrick91/pytest-language-server"
+Repository = "https://github.com/patrick91/pytest-language-server"
+Issues = "https://github.com/patrick91/pytest-language-server/issues"
+
+[project.scripts]
+pytest-language-server = "pytest_language_server:main"
+
+[tool.maturin]
+bindings = "bin"
+
+[tool.uv]
+dev-dependencies = [
+    "maturin>=1.10.1",
+    "pre-commit>=4.0.0",
+]
+
+[tool.uv.sources]

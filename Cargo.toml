@@ -1,15 +1,21 @@
 [package]
-name = "pytest-lsp"
+name = "pytest-language-server"
 version = "0.1.0"
 edition = "2021"
+authors = ["Patrick Arminio <patrick.arminio@gmail.com>"]
+license = "MIT"
+description = "A blazingly fast Language Server Protocol implementation for pytest"
+repository = "https://github.com/patrick91/pytest-language-server"
+keywords = ["pytest", "lsp", "language-server", "testing"]
+categories = ["development-tools", "development-tools::testing"]
 
 [dependencies]
-tower-lsp = "0.20"
-tokio = { version = "1", features = ["full"] }
+tower-lsp = "0.20.0"
+tokio = { version = "1.48", features = ["full"] }
 serde_json = "1.0"
-rustpython-parser = "0.4"
-walkdir = "2.4"
-dashmap = "5.5"
+rustpython-parser = "0.4.0"
+walkdir = "2.5"
+dashmap = "6.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"

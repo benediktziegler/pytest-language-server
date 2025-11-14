@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
-use tracing::{info, warn, debug};
+use tracing::{info, warn};
 
 #[derive(Debug)]
 struct Backend {
@@ -17,13 +17,16 @@ struct Backend {
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
         info!("Initialize request received");
-        
+
         // Scan the workspace for fixtures on initialization
         if let Some(root_uri) = params.root_uri.clone() {
             if let Ok(root_path) = root_uri.to_file_path() {
                 info!("Scanning workspace: {:?}", root_path);
                 self.client
-                    .log_message(MessageType::INFO, format!("Scanning workspace: {:?}", root_path))
+                    .log_message(
+                        MessageType::INFO,
+                        format!("Scanning workspace: {:?}", root_path),
+                    )
                     .await;
                 self.fixture_db.scan_workspace(&root_path);
                 info!("Workspace scan complete");
@@ -38,8 +41,8 @@ impl LanguageServer for Backend {
         info!("Returning initialize result with capabilities");
         Ok(InitializeResult {
             server_info: Some(ServerInfo {
-                name: "pytest-lsp".to_string(),
-                version: Some("0.1.0".to_string()),
+                name: "pytest-language-server".to_string(),
+                version: Some(env!("CARGO_PKG_VERSION").to_string()),
             }),
             capabilities: ServerCapabilities {
                 definition_provider: Some(OneOf::Left(true)),
@@ -56,7 +59,7 @@ impl LanguageServer for Backend {
     async fn initialized(&self, _: InitializedParams) {
         info!("Server initialized notification received");
         self.client
-            .log_message(MessageType::INFO, "pytest-lsp server initialized")
+            .log_message(MessageType::INFO, "pytest-language-server initialized")
             .await;
     }
 
@@ -88,11 +91,17 @@ impl LanguageServer for Backend {
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
 
-        info!("goto_definition request: uri={:?}, line={}, char={}", uri, position.line, position.character);
+        info!(
+            "goto_definition request: uri={:?}, line={}, char={}",
+            uri, position.line, position.character
+        );
 
         if let Ok(file_path) = uri.to_file_path() {
-            info!("Looking for fixture definition at {:?}:{}:{}", file_path, position.line, position.character);
-            
+            info!(
+                "Looking for fixture definition at {:?}:{}:{}",
+                file_path, position.line, position.character
+            );
+
             if let Some(definition) = self.fixture_db.find_fixture_definition(
                 &file_path,
                 position.line,
@@ -106,7 +115,7 @@ impl LanguageServer for Backend {
                         return Ok(None);
                     }
                 };
-                
+
                 let location = Location {
                     uri: def_uri.clone(),
                     range: Range {
@@ -136,39 +145,53 @@ impl LanguageServer for Backend {
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
 
-        info!("hover request: uri={:?}, line={}, char={}", uri, position.line, position.character);
+        info!(
+            "hover request: uri={:?}, line={}, char={}",
+            uri, position.line, position.character
+        );
 
         if let Ok(file_path) = uri.to_file_path() {
-            info!("Looking for fixture at {:?}:{}:{}", file_path, position.line, position.character);
-            
+            info!(
+                "Looking for fixture at {:?}:{}:{}",
+                file_path, position.line, position.character
+            );
+
             if let Some(definition) = self.fixture_db.find_fixture_definition(
                 &file_path,
                 position.line,
                 position.character,
             ) {
                 info!("Found fixture definition for hover: {:?}", definition.name);
-                
+
                 // Build hover content
                 let mut content = String::new();
-                
+
                 // Header with fixture name
-                content.push_str(&format!("```python\n@pytest.fixture\ndef {}(...):\n```\n", definition.name));
-                
+                content.push_str(&format!(
+                    "```python\n@pytest.fixture\ndef {}(...):\n```\n",
+                    definition.name
+                ));
+
                 // Add file path
                 if let Some(file_name) = definition.file_path.file_name() {
-                    content.push_str(&format!("\n**Defined in:** `{}`\n", file_name.to_string_lossy()));
+                    content.push_str(&format!(
+                        "\n**Defined in:** `{}`\n",
+                        file_name.to_string_lossy()
+                    ));
                 }
-                
+
                 // Add docstring if present
                 if let Some(ref docstring) = definition.docstring {
                     content.push_str("\n---\n\n");
-                    
+
                     // Check if docstring looks like it contains markdown formatting
                     // (contains headers, lists, code blocks, etc.)
-                    let looks_like_markdown = docstring.contains("```") 
+                    let looks_like_markdown = docstring.contains("```")
                         || docstring.contains("# ")
-                        || docstring.lines().any(|l| l.trim_start().starts_with("- ") || l.trim_start().starts_with("* "));
-                    
+                        || docstring.lines().any(|l| {
+                            l.trim_start().starts_with("- ") || l.trim_start().starts_with("* ")
+                        });
+
                     if looks_like_markdown {
                         // Render as markdown
                         content.push_str(docstring);
@@ -177,7 +200,7 @@ impl LanguageServer for Backend {
                         content.push_str(docstring);
                     }
                 }
-                
+
                 info!("Returning hover with content");
                 return Ok(Some(Hover {
                     contents: HoverContents::Markup(MarkupContent {
@@ -200,29 +223,42 @@ impl LanguageServer for Backend {
         let uri = params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
 
-        info!("references request: uri={:?}, line={}, char={}", uri, position.line, position.character);
+        info!(
+            "references request: uri={:?}, line={}, char={}",
+            uri, position.line, position.character
+        );
 
         if let Ok(file_path) = uri.to_file_path() {
-            info!("Looking for fixture references at {:?}:{}:{}", file_path, position.line, position.character);
-            
+            info!(
+                "Looking for fixture references at {:?}:{}:{}",
+                file_path, position.line, position.character
+            );
+
             // First, find which fixture we're looking at (definition or usage)
             if let Some(fixture_name) = self.fixture_db.find_fixture_at_position(
                 &file_path,
                 position.line,
                 position.character,
             ) {
-                info!("Found fixture: {}, searching for all references", fixture_name);
-                
+                info!(
+                    "Found fixture: {}, searching for all references",
+                    fixture_name
+                );
+
                 // Find all references to this fixture
                 let references = self.fixture_db.find_fixture_references(&fixture_name);
-                
+
                 if references.is_empty() {
                     info!("No references found for fixture: {}", fixture_name);
                     return Ok(None);
                 }
-                
-                info!("Found {} references for fixture: {}", references.len(), fixture_name);
-                
+
+                info!(
+                    "Found {} references for fixture: {}",
+                    references.len(),
+                    fixture_name
+                );
+
                 // Convert references to LSP Locations
                 let mut locations = Vec::new();
                 for reference in references {
@@ -233,7 +269,7 @@ impl LanguageServer for Backend {
                             continue;
                         }
                     };
-                    
+
                     let location = Location {
                         uri: ref_uri,
                         range: Range {
@@ -249,7 +285,7 @@ impl LanguageServer for Backend {
                     };
                     locations.push(location);
                 }
-                
+
                 info!("Returning {} locations", locations.len());
                 return Ok(Some(locations));
             } else {
@@ -269,25 +305,21 @@ impl LanguageServer for Backend {
 
 #[tokio::main]
 async fn main() {
-    // Set up file logging
-    let home_dir = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let log_path = std::path::Path::new(&home_dir).join(".pytest_lsp.log");
-    
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .expect("Failed to open log file");
-    
-    let (non_blocking, _guard) = tracing_appender::non_blocking(file);
-    
+    // Set up stderr logging with env-filter support
+    // Users can control verbosity with RUST_LOG env var:
+    // RUST_LOG=debug pytest-language-server
+    // RUST_LOG=info pytest-language-server
+    // RUST_LOG=warn pytest-language-server (default)
     tracing_subscriber::fmt()
-        .with_writer(non_blocking)
+        .with_writer(std::io::stderr)
         .with_ansi(false)
-        .with_max_level(tracing::Level::DEBUG)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
         .init();
 
-    info!("pytest-lsp starting up, logging to {:?}", log_path);
+    info!("pytest-language-server starting");
 
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
@@ -298,7 +330,7 @@ async fn main() {
         client,
         fixture_db: fixture_db.clone(),
     });
-    
-    info!("LSP server starting");
+
+    info!("LSP server ready");
     Server::new(stdin, stdout, socket).serve(service).await;
 }
