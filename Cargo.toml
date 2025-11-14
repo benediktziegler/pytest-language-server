@@ -1,0 +1,19 @@
+[package]
+name = "pytest-lsp"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tower-lsp = "0.20"
+tokio = { version = "1", features = ["full"] }
+serde_json = "1.0"
+rustpython-parser = "0.4"
+walkdir = "2.4"
+dashmap = "5.5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+[[example]]
+name = "test_parser_api"
+path = "test_parser_api.rs"
