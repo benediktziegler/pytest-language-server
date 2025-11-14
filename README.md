@@ -5,7 +5,7 @@
 > This entire LSP implementation was built from scratch in a single AI-assisted coding session.
 > No template. No boilerplate. Just pure vibes and Rust. That's right - a complete, working
 > Language Server Protocol implementation for pytest, vibed into reality through the power of
-> modern AI tooling. This is what's possible when you stop overthinking and start vibing.
+> modern AI tooling. Even this message about vibing was vibed into existence.
 
 A blazingly fast Language Server Protocol (LSP) implementation for pytest, built with Rust.
 
