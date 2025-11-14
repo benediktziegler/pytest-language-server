@@ -877,8 +877,9 @@ def test_something(my_fixture):
         db.analyze_file(test_path.clone(), test_content);
 
         // Try to find the definition from the test file
-        // The usage is on line 3 (1-indexed), which is line 2 in 0-indexed LSP coordinates
-        let definition = db.find_fixture_definition(&test_path, 2, 0);
+        // The usage is on line 2 (1-indexed) - that's where the function parameter is
+        // In 0-indexed LSP coordinates, that's line 1
+        let definition = db.find_fixture_definition(&test_path, 1, 0);
 
         assert!(definition.is_some(), "Definition should be found");
         let def = definition.unwrap();
