@@ -23,6 +23,17 @@ pub struct FixtureUsage {
     pub end_char: usize,   // Character position where this usage ends (on the line)
 }
 
+#[derive(Debug, Clone)]
+pub struct UndeclaredFixture {
+    pub name: String,
+    pub file_path: PathBuf,
+    pub line: usize,
+    pub start_char: usize,
+    pub end_char: usize,
+    pub function_name: String, // Name of the test/fixture function where this is used
+    pub function_line: usize,  // Line where the function is defined
+}
+
 #[derive(Debug)]
 pub struct FixtureDatabase {
     // Map from fixture name to all its definitions (can be in multiple conftest.py files)
@@ -31,6 +42,8 @@ pub struct FixtureDatabase {
     usages: Arc<DashMap<PathBuf, Vec<FixtureUsage>>>,
     // Cache of file contents for analyzed files (mainly for testing)
     file_cache: Arc<DashMap<PathBuf, String>>,
+    // Map from file path to undeclared fixtures used in function bodies
+    undeclared_fixtures: Arc<DashMap<PathBuf, Vec<UndeclaredFixture>>>,
 }
 
 impl Default for FixtureDatabase {
@@ -45,6 +58,7 @@ impl FixtureDatabase {
             definitions: Arc::new(DashMap::new()),
             usages: Arc::new(DashMap::new()),
             file_cache: Arc::new(DashMap::new()),
+            undeclared_fixtures: Arc::new(DashMap::new()),
         }
     }
 
@@ -263,6 +277,9 @@ impl FixtureDatabase {
         // Clear previous usages for this file
         self.usages.remove(&file_path);
 
+        // Clear previous undeclared fixtures for this file
+        self.undeclared_fixtures.remove(&file_path);
+
         // Clear previous fixture definitions from this file
         // We need to remove definitions that were in this file
         for mut entry in self.definitions.iter_mut() {
@@ -391,13 +408,23 @@ impl FixtureDatabase {
             }
         }
 
-        // Check if this is a test function
-        if func_name.starts_with("test_") {
-            debug!("Found test function: {}", func_name);
+        // Check if this is a test function or fixture
+        let is_test_or_fixture = func_name.starts_with("test_") || is_fixture;
+
+        if is_test_or_fixture {
+            debug!("Found test/fixture function: {}", func_name);
+
+            // Collect declared parameters
+            let mut declared_params: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            declared_params.insert("self".to_string());
+            declared_params.insert("request".to_string()); // pytest built-in
 
             // Extract fixture usages from function parameters
             for arg in &args.args {
                 let arg_name = arg.def.arg.as_str();
+                declared_params.insert(arg_name.to_string());
+
                 if arg_name != "self" {
                     // Get the actual line where this parameter appears
                     // This handles multiline function signatures correctly
@@ -432,6 +459,17 @@ impl FixtureDatabase {
                         .push(usage);
                 }
             }
+
+            // Now scan the function body for undeclared fixture usages
+            let function_line = self.get_line_from_offset(range.start().to_usize(), content);
+            self.scan_function_body_for_undeclared_fixtures(
+                body,
+                file_path,
+                content,
+                &declared_params,
+                func_name,
+                function_line,
+            );
         }
     }
 
@@ -497,6 +535,392 @@ impl FixtureDatabase {
             }
             _ => false,
         }
+    }
+
+    fn scan_function_body_for_undeclared_fixtures(
+        &self,
+        body: &[Stmt],
+        file_path: &PathBuf,
+        content: &str,
+        declared_params: &std::collections::HashSet<String>,
+        function_name: &str,
+        function_line: usize,
+    ) {
+        // Walk through the function body and find all Name references
+        for stmt in body {
+            self.visit_stmt_for_names(
+                stmt,
+                file_path,
+                content,
+                declared_params,
+                function_name,
+                function_line,
+            );
+        }
+    }
+
+    fn visit_stmt_for_names(
+        &self,
+        stmt: &Stmt,
+        file_path: &PathBuf,
+        content: &str,
+        declared_params: &std::collections::HashSet<String>,
+        function_name: &str,
+        function_line: usize,
+    ) {
+        match stmt {
+            Stmt::Expr(expr_stmt) => {
+                self.visit_expr_for_names(
+                    &expr_stmt.value,
+                    file_path,
+                    content,
+                    declared_params,
+                    function_name,
+                    function_line,
+                );
+            }
+            Stmt::Assign(assign) => {
+                self.visit_expr_for_names(
+                    &assign.value,
+                    file_path,
+                    content,
+                    declared_params,
+                    function_name,
+                    function_line,
+                );
+            }
+            Stmt::AugAssign(aug_assign) => {
+                self.visit_expr_for_names(
+                    &aug_assign.value,
+                    file_path,
+                    content,
+                    declared_params,
+                    function_name,
+                    function_line,
+                );
+            }
+            Stmt::Return(ret) => {
+                if let Some(ref value) = ret.value {
+                    self.visit_expr_for_names(
+                        value,
+                        file_path,
+                        content,
+                        declared_params,
+                        function_name,
+                        function_line,
+                    );
+                }
+            }
+            Stmt::If(if_stmt) => {
+                self.visit_expr_for_names(
+                    &if_stmt.test,
+                    file_path,
+                    content,
+                    declared_params,
+                    function_name,
+                    function_line,
+                );
+                for stmt in &if_stmt.body {
+                    self.visit_stmt_for_names(
+                        stmt,
+                        file_path,
+                        content,
+                        declared_params,
+                        function_name,
+                        function_line,
+                    );
+                }
+                for stmt in &if_stmt.orelse {
+                    self.visit_stmt_for_names(
+                        stmt,
+                        file_path,
+                        content,
+                        declared_params,
+                        function_name,
+                        function_line,
+                    );
+                }
+            }
+            Stmt::While(while_stmt) => {
+                self.visit_expr_for_names(
+                    &while_stmt.test,
+                    file_path,
+                    content,
+                    declared_params,
+                    function_name,
+                    function_line,
+                );
+                for stmt in &while_stmt.body {
+                    self.visit_stmt_for_names(
+                        stmt,
+                        file_path,
+                        content,
+                        declared_params,
+                        function_name,
+                        function_line,
+                    );
+                }
+            }
+            Stmt::For(for_stmt) => {
+                self.visit_expr_for_names(
+                    &for_stmt.iter,
+                    file_path,
+                    content,
+                    declared_params,
+                    function_name,
+                    function_line,
+                );
+                for stmt in &for_stmt.body {
+                    self.visit_stmt_for_names(
+                        stmt,
+                        file_path,
+                        content,
+                        declared_params,
+                        function_name,
+                        function_line,
+                    );
+                }
+            }
+            Stmt::With(with_stmt) => {
+                for item in &with_stmt.items {
+                    self.visit_expr_for_names(
+                        &item.context_expr,
+                        file_path,
+                        content,
+                        declared_params,
+                        function_name,
+                        function_line,
+                    );
+                }
+                for stmt in &with_stmt.body {
+                    self.visit_stmt_for_names(
+                        stmt,
+                        file_path,
+                        content,
+                        declared_params,
+                        function_name,
+                        function_line,
+                    );
+                }
+            }
+            _ => {} // Other statement types
+        }
+    }
+
+    fn visit_expr_for_names(
+        &self,
+        expr: &Expr,
+        file_path: &PathBuf,
+        content: &str,
+        declared_params: &std::collections::HashSet<String>,
+        function_name: &str,
+        function_line: usize,
+    ) {
+        match expr {
+            Expr::Name(name) => {
+                let name_str = name.id.as_str();
+
+                // Check if this name is a known fixture and not a declared parameter
+                if !declared_params.contains(name_str)
+                    && self.is_available_fixture(file_path, name_str)
+                {
+                    let line = self.get_line_from_offset(name.range.start().to_usize(), content);
+                    let start_char =
+                        self.get_char_position_from_offset(name.range.start().to_usize(), content);
+                    let end_char =
+                        self.get_char_position_from_offset(name.range.end().to_usize(), content);
+
+                    info!(
+                        "Found undeclared fixture usage: {} at {:?}:{}:{} in function {}",
+                        name_str, file_path, line, start_char, function_name
+                    );
+
+                    let undeclared = UndeclaredFixture {
+                        name: name_str.to_string(),
+                        file_path: file_path.clone(),
+                        line,
+                        start_char,
+                        end_char,
+                        function_name: function_name.to_string(),
+                        function_line,
+                    };
+
+                    self.undeclared_fixtures
+                        .entry(file_path.clone())
+                        .or_default()
+                        .push(undeclared);
+                }
+            }
+            Expr::Call(call) => {
+                self.visit_expr_for_names(
+                    &call.func,
+                    file_path,
+                    content,
+                    declared_params,
+                    function_name,
+                    function_line,
+                );
+                for arg in &call.args {
+                    self.visit_expr_for_names(
+                        arg,
+                        file_path,
+                        content,
+                        declared_params,
+                        function_name,
+                        function_line,
+                    );
+                }
+            }
+            Expr::Attribute(attr) => {
+                self.visit_expr_for_names(
+                    &attr.value,
+                    file_path,
+                    content,
+                    declared_params,
+                    function_name,
+                    function_line,
+                );
+            }
+            Expr::BinOp(binop) => {
+                self.visit_expr_for_names(
+                    &binop.left,
+                    file_path,
+                    content,
+                    declared_params,
+                    function_name,
+                    function_line,
+                );
+                self.visit_expr_for_names(
+                    &binop.right,
+                    file_path,
+                    content,
+                    declared_params,
+                    function_name,
+                    function_line,
+                );
+            }
+            Expr::UnaryOp(unaryop) => {
+                self.visit_expr_for_names(
+                    &unaryop.operand,
+                    file_path,
+                    content,
+                    declared_params,
+                    function_name,
+                    function_line,
+                );
+            }
+            Expr::Compare(compare) => {
+                self.visit_expr_for_names(
+                    &compare.left,
+                    file_path,
+                    content,
+                    declared_params,
+                    function_name,
+                    function_line,
+                );
+                for comparator in &compare.comparators {
+                    self.visit_expr_for_names(
+                        comparator,
+                        file_path,
+                        content,
+                        declared_params,
+                        function_name,
+                        function_line,
+                    );
+                }
+            }
+            Expr::Subscript(subscript) => {
+                self.visit_expr_for_names(
+                    &subscript.value,
+                    file_path,
+                    content,
+                    declared_params,
+                    function_name,
+                    function_line,
+                );
+                self.visit_expr_for_names(
+                    &subscript.slice,
+                    file_path,
+                    content,
+                    declared_params,
+                    function_name,
+                    function_line,
+                );
+            }
+            Expr::List(list) => {
+                for elt in &list.elts {
+                    self.visit_expr_for_names(
+                        elt,
+                        file_path,
+                        content,
+                        declared_params,
+                        function_name,
+                        function_line,
+                    );
+                }
+            }
+            Expr::Tuple(tuple) => {
+                for elt in &tuple.elts {
+                    self.visit_expr_for_names(
+                        elt,
+                        file_path,
+                        content,
+                        declared_params,
+                        function_name,
+                        function_line,
+                    );
+                }
+            }
+            Expr::Dict(dict) => {
+                for k in dict.keys.iter().flatten() {
+                    self.visit_expr_for_names(
+                        k,
+                        file_path,
+                        content,
+                        declared_params,
+                        function_name,
+                        function_line,
+                    );
+                }
+                for value in &dict.values {
+                    self.visit_expr_for_names(
+                        value,
+                        file_path,
+                        content,
+                        declared_params,
+                        function_name,
+                        function_line,
+                    );
+                }
+            }
+            _ => {} // Other expression types
+        }
+    }
+
+    fn is_available_fixture(&self, file_path: &Path, fixture_name: &str) -> bool {
+        // Check if this fixture exists and is available at this file location
+        if let Some(definitions) = self.definitions.get(fixture_name) {
+            // Check if any definition is available from this file location
+            for def in definitions.iter() {
+                // Fixture is available if it's in the same file or in a conftest.py in a parent directory
+                if def.file_path == file_path {
+                    return true;
+                }
+
+                // Check if it's in a conftest.py in a parent directory
+                if def.file_path.file_name().and_then(|n| n.to_str()) == Some("conftest.py")
+                    && file_path.starts_with(def.file_path.parent().unwrap_or(Path::new("")))
+                {
+                    return true;
+                }
+
+                // Check if it's in a virtual environment (third-party fixture)
+                if def.file_path.to_string_lossy().contains("site-packages") {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     fn extract_docstring(&self, body: &[Stmt]) -> Option<String> {
@@ -1090,6 +1514,14 @@ impl FixtureDatabase {
             matching_references.len()
         );
         matching_references
+    }
+
+    /// Get all undeclared fixture usages for a file
+    pub fn get_undeclared_fixtures(&self, file_path: &Path) -> Vec<UndeclaredFixture> {
+        self.undeclared_fixtures
+            .get(file_path)
+            .map(|entry| entry.value().clone())
+            .unwrap_or_default()
     }
 }
 

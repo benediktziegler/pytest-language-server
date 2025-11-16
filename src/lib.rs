@@ -1,3 +1,3 @@
 pub mod fixtures;
 
-pub use fixtures::{FixtureDatabase, FixtureDefinition, FixtureUsage};
+pub use fixtures::{FixtureDatabase, FixtureDefinition, FixtureUsage, UndeclaredFixture};

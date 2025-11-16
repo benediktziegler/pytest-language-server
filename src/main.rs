@@ -49,6 +49,7 @@ impl LanguageServer for Backend {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
                     TextDocumentSyncKind::FULL,
                 )),
+                code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 ..Default::default()
             },
         })
@@ -62,22 +63,29 @@ impl LanguageServer for Backend {
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
-        let uri = params.text_document.uri;
+        let uri = params.text_document.uri.clone();
         info!("did_open: {:?}", uri);
         if let Ok(file_path) = uri.to_file_path() {
             info!("Analyzing file: {:?}", file_path);
             self.fixture_db
-                .analyze_file(file_path, &params.text_document.text);
+                .analyze_file(file_path.clone(), &params.text_document.text);
+
+            // Publish diagnostics for undeclared fixtures
+            self.publish_diagnostics_for_file(&uri, &file_path).await;
         }
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
-        let uri = params.text_document.uri;
+        let uri = params.text_document.uri.clone();
         info!("did_change: {:?}", uri);
         if let Ok(file_path) = uri.to_file_path() {
             if let Some(change) = params.content_changes.first() {
                 info!("Re-analyzing file: {:?}", file_path);
-                self.fixture_db.analyze_file(file_path, &change.text);
+                self.fixture_db
+                    .analyze_file(file_path.clone(), &change.text);
+
+                // Publish diagnostics for undeclared fixtures
+                self.publish_diagnostics_for_file(&uri, &file_path).await;
             }
         }
     }
@@ -425,8 +433,165 @@ impl LanguageServer for Backend {
         Ok(None)
     }
 
+    async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
+        let uri = params.text_document.uri;
+        let range = params.range;
+
+        info!("code_action request: uri={:?}, range={:?}", uri, range);
+
+        if let Ok(file_path) = uri.to_file_path() {
+            let undeclared = self.fixture_db.get_undeclared_fixtures(&file_path);
+            let mut actions = Vec::new();
+
+            for fixture in undeclared {
+                // Check if this undeclared fixture is in the requested range
+                let fixture_line = (fixture.line - 1) as u32; // Convert to 0-indexed
+                if fixture_line >= range.start.line && fixture_line <= range.end.line {
+                    let fixture_start_char = fixture.start_char as u32;
+                    if fixture_line == range.start.line
+                        && fixture_start_char < range.start.character
+                    {
+                        continue;
+                    }
+                    if fixture_line == range.end.line && fixture_start_char >= range.end.character {
+                        continue;
+                    }
+
+                    // Create a code action to add this fixture as a parameter
+                    let function_line = (fixture.function_line - 1) as u32;
+
+                    // Read the file to determine where to insert the parameter
+                    if let Ok(content) = std::fs::read_to_string(&file_path) {
+                        let lines: Vec<&str> = content.lines().collect();
+                        if function_line < lines.len() as u32 {
+                            let func_line_content = lines[function_line as usize];
+
+                            // Find the closing parenthesis of the function signature
+                            // This is a simplified approach - works for single-line signatures
+                            if let Some(paren_pos) = func_line_content.find("):") {
+                                let insert_pos = if func_line_content[..paren_pos].contains('(') {
+                                    // Check if there are already parameters
+                                    let param_start = func_line_content.find('(').unwrap() + 1;
+                                    let params_section = &func_line_content[param_start..paren_pos];
+
+                                    if params_section.trim().is_empty() {
+                                        // No parameters yet
+                                        (function_line, (param_start as u32))
+                                    } else {
+                                        // Already has parameters, add after them
+                                        (function_line, (paren_pos as u32))
+                                    }
+                                } else {
+                                    continue;
+                                };
+
+                                let has_params = !func_line_content[..paren_pos]
+                                    .split('(')
+                                    .next_back()
+                                    .unwrap_or("")
+                                    .trim()
+                                    .is_empty();
+
+                                let text_to_insert = if has_params {
+                                    format!(", {}", fixture.name)
+                                } else {
+                                    fixture.name.clone()
+                                };
+
+                                let edit = WorkspaceEdit {
+                                    changes: Some(
+                                        vec![(
+                                            uri.clone(),
+                                            vec![TextEdit {
+                                                range: Range {
+                                                    start: Position {
+                                                        line: insert_pos.0,
+                                                        character: insert_pos.1,
+                                                    },
+                                                    end: Position {
+                                                        line: insert_pos.0,
+                                                        character: insert_pos.1,
+                                                    },
+                                                },
+                                                new_text: text_to_insert,
+                                            }],
+                                        )]
+                                        .into_iter()
+                                        .collect(),
+                                    ),
+                                    document_changes: None,
+                                    change_annotations: None,
+                                };
+
+                                let action = CodeAction {
+                                    title: format!("Add '{}' fixture parameter", fixture.name),
+                                    kind: Some(CodeActionKind::QUICKFIX),
+                                    diagnostics: None,
+                                    edit: Some(edit),
+                                    command: None,
+                                    is_preferred: Some(true),
+                                    disabled: None,
+                                    data: None,
+                                };
+
+                                actions.push(CodeActionOrCommand::CodeAction(action));
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !actions.is_empty() {
+                return Ok(Some(actions));
+            }
+        }
+
+        Ok(None)
+    }
+
     async fn shutdown(&self) -> Result<()> {
         Ok(())
+    }
+}
+
+impl Backend {
+    async fn publish_diagnostics_for_file(&self, uri: &Url, file_path: &std::path::Path) {
+        let undeclared = self.fixture_db.get_undeclared_fixtures(file_path);
+
+        let diagnostics: Vec<Diagnostic> = undeclared
+            .into_iter()
+            .map(|fixture| {
+                let line = (fixture.line - 1) as u32; // Convert to 0-indexed
+                Diagnostic {
+                    range: Range {
+                        start: Position {
+                            line,
+                            character: fixture.start_char as u32,
+                        },
+                        end: Position {
+                            line,
+                            character: fixture.end_char as u32,
+                        },
+                    },
+                    severity: Some(DiagnosticSeverity::WARNING),
+                    code: None,
+                    code_description: None,
+                    source: Some("pytest-lsp".to_string()),
+                    message: format!(
+                        "Fixture '{}' is used but not declared as a parameter in '{}'",
+                        fixture.name, fixture.function_name
+                    ),
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                }
+            })
+            .collect();
+
+        info!("Publishing {} diagnostics for {:?}", diagnostics.len(), uri);
+        self.client
+            .publish_diagnostics(uri.clone(), diagnostics, None)
+            .await;
     }
 }
 
