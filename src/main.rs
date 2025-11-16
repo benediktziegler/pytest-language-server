@@ -435,133 +435,117 @@ impl LanguageServer for Backend {
 
     async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
         let uri = params.text_document.uri;
-        let range = params.range;
+        let context = params.context;
 
-        info!("code_action request: uri={:?}, range={:?}", uri, range);
+        info!(
+            "code_action request: uri={:?}, diagnostics={}",
+            uri,
+            context.diagnostics.len()
+        );
 
         if let Ok(file_path) = uri.to_file_path() {
             let undeclared = self.fixture_db.get_undeclared_fixtures(&file_path);
             let mut actions = Vec::new();
 
-            for fixture in undeclared {
-                // Check if this undeclared fixture is in the requested range
-                let fixture_line = (fixture.line - 1) as u32; // Convert to 0-indexed
-                if fixture_line >= range.start.line && fixture_line <= range.end.line {
-                    let fixture_start_char = fixture.start_char as u32;
-                    if fixture_line == range.start.line
-                        && fixture_start_char < range.start.character
-                    {
-                        continue;
-                    }
-                    if fixture_line == range.end.line && fixture_start_char >= range.end.character {
-                        continue;
-                    }
+            // Process each diagnostic from the context
+            for diagnostic in &context.diagnostics {
+                // Check if this is an undeclared-fixture diagnostic
+                if let Some(NumberOrString::String(code)) = &diagnostic.code {
+                    if code == "undeclared-fixture" {
+                        // Find the corresponding undeclared fixture
+                        let diag_line = diagnostic.range.start.line + 1; // Convert to 1-indexed
+                        let diag_char = diagnostic.range.start.character as usize;
 
-                    // Create a code action to add this fixture as a parameter
-                    let function_line = (fixture.function_line - 1) as u32;
+                        if let Some(fixture) = undeclared
+                            .iter()
+                            .find(|f| f.line == diag_line as usize && f.start_char == diag_char)
+                        {
+                            // Create a code action to add this fixture as a parameter
+                            let function_line = (fixture.function_line - 1) as u32;
 
-                    // Read the file to determine where to insert the parameter
-                    if let Ok(content) = std::fs::read_to_string(&file_path) {
-                        let lines: Vec<&str> = content.lines().collect();
-                        if function_line < lines.len() as u32 {
-                            let func_line_content = lines[function_line as usize];
+                            // Read the file to determine where to insert the parameter
+                            if let Ok(content) = std::fs::read_to_string(&file_path) {
+                                let lines: Vec<&str> = content.lines().collect();
+                                if function_line < lines.len() as u32 {
+                                    let func_line_content = lines[function_line as usize];
 
-                            // Find the closing parenthesis of the function signature
-                            // This is a simplified approach - works for single-line signatures
-                            if let Some(paren_pos) = func_line_content.find("):") {
-                                let insert_pos = if func_line_content[..paren_pos].contains('(') {
-                                    // Check if there are already parameters
-                                    let param_start = func_line_content.find('(').unwrap() + 1;
-                                    let params_section = &func_line_content[param_start..paren_pos];
+                                    // Find the closing parenthesis of the function signature
+                                    // This is a simplified approach - works for single-line signatures
+                                    if let Some(paren_pos) = func_line_content.find("):") {
+                                        let insert_pos =
+                                            if func_line_content[..paren_pos].contains('(') {
+                                                // Check if there are already parameters
+                                                let param_start =
+                                                    func_line_content.find('(').unwrap() + 1;
+                                                let params_section =
+                                                    &func_line_content[param_start..paren_pos];
 
-                                    if params_section.trim().is_empty() {
-                                        // No parameters yet
-                                        (function_line, (param_start as u32))
-                                    } else {
-                                        // Already has parameters, add after them
-                                        (function_line, (paren_pos as u32))
+                                                if params_section.trim().is_empty() {
+                                                    // No parameters yet
+                                                    (function_line, (param_start as u32))
+                                                } else {
+                                                    // Already has parameters, add after them
+                                                    (function_line, (paren_pos as u32))
+                                                }
+                                            } else {
+                                                continue;
+                                            };
+
+                                        let has_params = !func_line_content[..paren_pos]
+                                            .split('(')
+                                            .next_back()
+                                            .unwrap_or("")
+                                            .trim()
+                                            .is_empty();
+
+                                        let text_to_insert = if has_params {
+                                            format!(", {}", fixture.name)
+                                        } else {
+                                            fixture.name.clone()
+                                        };
+
+                                        let edit = WorkspaceEdit {
+                                            changes: Some(
+                                                vec![(
+                                                    uri.clone(),
+                                                    vec![TextEdit {
+                                                        range: Range {
+                                                            start: Position {
+                                                                line: insert_pos.0,
+                                                                character: insert_pos.1,
+                                                            },
+                                                            end: Position {
+                                                                line: insert_pos.0,
+                                                                character: insert_pos.1,
+                                                            },
+                                                        },
+                                                        new_text: text_to_insert,
+                                                    }],
+                                                )]
+                                                .into_iter()
+                                                .collect(),
+                                            ),
+                                            document_changes: None,
+                                            change_annotations: None,
+                                        };
+
+                                        let action = CodeAction {
+                                            title: format!(
+                                                "Add '{}' fixture parameter",
+                                                fixture.name
+                                            ),
+                                            kind: Some(CodeActionKind::QUICKFIX),
+                                            diagnostics: Some(vec![diagnostic.clone()]),
+                                            edit: Some(edit),
+                                            command: None,
+                                            is_preferred: Some(true),
+                                            disabled: None,
+                                            data: None,
+                                        };
+
+                                        actions.push(CodeActionOrCommand::CodeAction(action));
                                     }
-                                } else {
-                                    continue;
-                                };
-
-                                let has_params = !func_line_content[..paren_pos]
-                                    .split('(')
-                                    .next_back()
-                                    .unwrap_or("")
-                                    .trim()
-                                    .is_empty();
-
-                                let text_to_insert = if has_params {
-                                    format!(", {}", fixture.name)
-                                } else {
-                                    fixture.name.clone()
-                                };
-
-                                let edit = WorkspaceEdit {
-                                    changes: Some(
-                                        vec![(
-                                            uri.clone(),
-                                            vec![TextEdit {
-                                                range: Range {
-                                                    start: Position {
-                                                        line: insert_pos.0,
-                                                        character: insert_pos.1,
-                                                    },
-                                                    end: Position {
-                                                        line: insert_pos.0,
-                                                        character: insert_pos.1,
-                                                    },
-                                                },
-                                                new_text: text_to_insert,
-                                            }],
-                                        )]
-                                        .into_iter()
-                                        .collect(),
-                                    ),
-                                    document_changes: None,
-                                    change_annotations: None,
-                                };
-
-                                // Create the diagnostic that this code action applies to
-                                let diagnostic = Diagnostic {
-                                    range: Range {
-                                        start: Position {
-                                            line: fixture_line,
-                                            character: fixture_start_char,
-                                        },
-                                        end: Position {
-                                            line: fixture_line,
-                                            character: fixture.end_char as u32,
-                                        },
-                                    },
-                                    severity: Some(DiagnosticSeverity::WARNING),
-                                    code: Some(NumberOrString::String(
-                                        "undeclared-fixture".to_string(),
-                                    )),
-                                    code_description: None,
-                                    source: Some("pytest-lsp".to_string()),
-                                    message: format!(
-                                        "Fixture '{}' is used but not declared as a parameter",
-                                        fixture.name
-                                    ),
-                                    related_information: None,
-                                    tags: None,
-                                    data: None,
-                                };
-
-                                let action = CodeAction {
-                                    title: format!("Add '{}' fixture parameter", fixture.name),
-                                    kind: Some(CodeActionKind::QUICKFIX),
-                                    diagnostics: Some(vec![diagnostic]),
-                                    edit: Some(edit),
-                                    command: None,
-                                    is_preferred: Some(true),
-                                    disabled: None,
-                                    data: None,
-                                };
-
-                                actions.push(CodeActionOrCommand::CodeAction(action));
+                                }
                             }
                         }
                     }

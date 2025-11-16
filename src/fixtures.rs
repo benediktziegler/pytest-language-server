@@ -580,14 +580,15 @@ impl FixtureDatabase {
         function_name: &str,
         function_line: usize,
     ) {
-        // First, collect all local variable names (left-hand side of assignments)
-        let mut local_vars = std::collections::HashSet::new();
-        self.collect_local_variables(body, &mut local_vars);
+        // First, collect all local variable names with their definition line numbers
+        let mut local_vars = std::collections::HashMap::new();
+        self.collect_local_variables(body, content, &mut local_vars);
 
         // Also add imported names to local_vars (they shouldn't be flagged as undeclared fixtures)
+        // Set their line to 0 so they're always considered "in scope"
         if let Some(imports) = self.imports.get(file_path) {
             for import in imports.iter() {
-                local_vars.insert(import.clone());
+                local_vars.insert(import.clone(), 0);
             }
         }
 
@@ -667,64 +668,106 @@ impl FixtureDatabase {
     fn collect_local_variables(
         &self,
         body: &[Stmt],
-        local_vars: &mut std::collections::HashSet<String>,
+        content: &str,
+        local_vars: &mut std::collections::HashMap<String, usize>,
     ) {
         for stmt in body {
             match stmt {
                 Stmt::Assign(assign) => {
-                    // Collect variable names from left-hand side
+                    // Collect variable names from left-hand side with their line numbers
+                    let line = self.get_line_from_offset(assign.range.start().to_usize(), content);
+                    let mut temp_names = std::collections::HashSet::new();
                     for target in &assign.targets {
-                        self.collect_names_from_expr(target, local_vars);
+                        self.collect_names_from_expr(target, &mut temp_names);
+                    }
+                    for name in temp_names {
+                        local_vars.insert(name, line);
                     }
                 }
                 Stmt::AnnAssign(ann_assign) => {
-                    // Collect annotated assignment targets
-                    self.collect_names_from_expr(&ann_assign.target, local_vars);
+                    // Collect annotated assignment targets with their line numbers
+                    let line =
+                        self.get_line_from_offset(ann_assign.range.start().to_usize(), content);
+                    let mut temp_names = std::collections::HashSet::new();
+                    self.collect_names_from_expr(&ann_assign.target, &mut temp_names);
+                    for name in temp_names {
+                        local_vars.insert(name, line);
+                    }
                 }
                 Stmt::AugAssign(aug_assign) => {
                     // Collect augmented assignment targets (+=, -=, etc.)
-                    self.collect_names_from_expr(&aug_assign.target, local_vars);
+                    let line =
+                        self.get_line_from_offset(aug_assign.range.start().to_usize(), content);
+                    let mut temp_names = std::collections::HashSet::new();
+                    self.collect_names_from_expr(&aug_assign.target, &mut temp_names);
+                    for name in temp_names {
+                        local_vars.insert(name, line);
+                    }
                 }
                 Stmt::For(for_stmt) => {
-                    // Collect loop variable
-                    self.collect_names_from_expr(&for_stmt.target, local_vars);
+                    // Collect loop variable with its line number
+                    let line =
+                        self.get_line_from_offset(for_stmt.range.start().to_usize(), content);
+                    let mut temp_names = std::collections::HashSet::new();
+                    self.collect_names_from_expr(&for_stmt.target, &mut temp_names);
+                    for name in temp_names {
+                        local_vars.insert(name, line);
+                    }
                     // Recursively collect from body
-                    self.collect_local_variables(&for_stmt.body, local_vars);
+                    self.collect_local_variables(&for_stmt.body, content, local_vars);
                 }
                 Stmt::AsyncFor(for_stmt) => {
-                    self.collect_names_from_expr(&for_stmt.target, local_vars);
-                    self.collect_local_variables(&for_stmt.body, local_vars);
+                    let line =
+                        self.get_line_from_offset(for_stmt.range.start().to_usize(), content);
+                    let mut temp_names = std::collections::HashSet::new();
+                    self.collect_names_from_expr(&for_stmt.target, &mut temp_names);
+                    for name in temp_names {
+                        local_vars.insert(name, line);
+                    }
+                    self.collect_local_variables(&for_stmt.body, content, local_vars);
                 }
                 Stmt::While(while_stmt) => {
-                    self.collect_local_variables(&while_stmt.body, local_vars);
+                    self.collect_local_variables(&while_stmt.body, content, local_vars);
                 }
                 Stmt::If(if_stmt) => {
-                    self.collect_local_variables(&if_stmt.body, local_vars);
-                    self.collect_local_variables(&if_stmt.orelse, local_vars);
+                    self.collect_local_variables(&if_stmt.body, content, local_vars);
+                    self.collect_local_variables(&if_stmt.orelse, content, local_vars);
                 }
                 Stmt::With(with_stmt) => {
-                    // Collect context manager variables
+                    // Collect context manager variables with their line numbers
+                    let line =
+                        self.get_line_from_offset(with_stmt.range.start().to_usize(), content);
                     for item in &with_stmt.items {
                         if let Some(ref optional_vars) = item.optional_vars {
-                            self.collect_names_from_expr(optional_vars, local_vars);
+                            let mut temp_names = std::collections::HashSet::new();
+                            self.collect_names_from_expr(optional_vars, &mut temp_names);
+                            for name in temp_names {
+                                local_vars.insert(name, line);
+                            }
                         }
                     }
-                    self.collect_local_variables(&with_stmt.body, local_vars);
+                    self.collect_local_variables(&with_stmt.body, content, local_vars);
                 }
                 Stmt::AsyncWith(with_stmt) => {
+                    let line =
+                        self.get_line_from_offset(with_stmt.range.start().to_usize(), content);
                     for item in &with_stmt.items {
                         if let Some(ref optional_vars) = item.optional_vars {
-                            self.collect_names_from_expr(optional_vars, local_vars);
+                            let mut temp_names = std::collections::HashSet::new();
+                            self.collect_names_from_expr(optional_vars, &mut temp_names);
+                            for name in temp_names {
+                                local_vars.insert(name, line);
+                            }
                         }
                     }
-                    self.collect_local_variables(&with_stmt.body, local_vars);
+                    self.collect_local_variables(&with_stmt.body, content, local_vars);
                 }
                 Stmt::Try(try_stmt) => {
-                    self.collect_local_variables(&try_stmt.body, local_vars);
+                    self.collect_local_variables(&try_stmt.body, content, local_vars);
                     // Note: ExceptHandler struct doesn't expose name/body in current API
                     // This is a limitation of rustpython-parser 0.4.0
-                    self.collect_local_variables(&try_stmt.orelse, local_vars);
-                    self.collect_local_variables(&try_stmt.finalbody, local_vars);
+                    self.collect_local_variables(&try_stmt.orelse, content, local_vars);
+                    self.collect_local_variables(&try_stmt.finalbody, content, local_vars);
                 }
                 _ => {}
             }
@@ -758,7 +801,7 @@ impl FixtureDatabase {
         file_path: &PathBuf,
         content: &str,
         declared_params: &std::collections::HashSet<String>,
-        local_vars: &std::collections::HashSet<String>,
+        local_vars: &std::collections::HashMap<String, usize>,
         function_name: &str,
         function_line: usize,
     ) {
@@ -989,20 +1032,27 @@ impl FixtureDatabase {
         file_path: &PathBuf,
         content: &str,
         declared_params: &std::collections::HashSet<String>,
-        local_vars: &std::collections::HashSet<String>,
+        local_vars: &std::collections::HashMap<String, usize>,
         function_name: &str,
         function_line: usize,
     ) {
         match expr {
             Expr::Name(name) => {
                 let name_str = name.id.as_str();
+                let line = self.get_line_from_offset(name.range.start().to_usize(), content);
 
-                // Check if this name is a known fixture and not a declared parameter or local variable
+                // Check if this name is a known fixture and not a declared parameter
+                // For local variables, only exclude them if they're defined BEFORE the current line
+                // (Python variables are only in scope after they're assigned)
+                let is_local_var_in_scope = local_vars
+                    .get(name_str)
+                    .map(|def_line| *def_line < line)
+                    .unwrap_or(false);
+
                 if !declared_params.contains(name_str)
-                    && !local_vars.contains(name_str)
+                    && !is_local_var_in_scope
                     && self.is_available_fixture(file_path, name_str)
                 {
-                    let line = self.get_line_from_offset(name.range.start().to_usize(), content);
                     let start_char =
                         self.get_char_position_from_offset(name.range.start().to_usize(), content);
                     let end_char =
@@ -3686,5 +3736,122 @@ def test_with_class():
         undeclared.len(),
         0,
         "Should not detect undeclared fixture when name is a class"
+    );
+}
+
+#[test]
+fn test_line_aware_local_variable_scope() {
+    // Test that local variables are only considered "in scope" AFTER they're assigned
+    let db = FixtureDatabase::new();
+
+    // Conftest with http_client fixture
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def http_client():
+    return "MockClient"
+"#;
+    let conftest_path = PathBuf::from("/tmp/conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    // Test file that uses http_client before and after a local assignment
+    let test_content = r#"async def test_example():
+    # Line 1: http_client should be flagged (not yet assigned)
+    result = await http_client.get("/api")
+    # Line 3: Now we assign http_client locally
+    http_client = "local"
+    # Line 5: http_client should NOT be flagged (local var now)
+    result2 = await http_client.get("/api2")
+"#;
+    let test_path = PathBuf::from("/tmp/test_example.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Check for undeclared fixtures
+    let undeclared = db.get_undeclared_fixtures(&test_path);
+
+    // Should only detect http_client on line 3 (usage before assignment)
+    // NOT on line 7 (after assignment on line 5)
+    assert_eq!(
+        undeclared.len(),
+        1,
+        "Should detect http_client only before local assignment"
+    );
+    assert_eq!(undeclared[0].name, "http_client");
+    // Line numbers: 1=def, 2=comment, 3=result (first usage), 4=comment, 5=assignment, 6=comment, 7=result2
+    assert_eq!(
+        undeclared[0].line, 3,
+        "Should flag usage on line 3 (before assignment on line 5)"
+    );
+}
+
+#[test]
+fn test_same_line_assignment_and_usage() {
+    // Test that usage on the same line as assignment refers to the fixture
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"import pytest
+
+@pytest.fixture
+def http_client():
+    return "parent"
+"#;
+    let conftest_path = PathBuf::from("/tmp/conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let test_content = r#"async def test_example():
+    # This references the fixture on the RHS, then assigns to local var
+    http_client = await http_client.get("/api")
+"#;
+    let test_path = PathBuf::from("/tmp/test_example.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    let undeclared = db.get_undeclared_fixtures(&test_path);
+
+    // Should detect http_client on RHS (line 3) because assignment hasn't happened yet
+    assert_eq!(undeclared.len(), 1);
+    assert_eq!(undeclared[0].name, "http_client");
+    assert_eq!(undeclared[0].line, 3);
+}
+
+#[test]
+fn test_no_false_positive_for_later_assignment() {
+    // This is the actual bug we fixed - make sure local assignment later in function
+    // doesn't prevent detection of undeclared fixture usage BEFORE the assignment
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"import pytest
+
+@pytest.fixture
+def http_client():
+    return "fixture"
+"#;
+    let conftest_path = PathBuf::from("/tmp/conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    // This was the original issue: http_client used on line 2, but assigned on line 4
+    // Old code would see the assignment and not flag line 2
+    let test_content = r#"async def test_example():
+    result = await http_client.get("/api")  # Should be flagged
+    # Now assign locally
+    http_client = "local"
+    # This should NOT be flagged because variable is now assigned
+    result2 = http_client
+"#;
+    let test_path = PathBuf::from("/tmp/test_example.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    let undeclared = db.get_undeclared_fixtures(&test_path);
+
+    // Should only detect one undeclared usage (line 2)
+    assert_eq!(
+        undeclared.len(),
+        1,
+        "Should detect exactly one undeclared fixture"
+    );
+    assert_eq!(undeclared[0].name, "http_client");
+    assert_eq!(
+        undeclared[0].line, 2,
+        "Should flag usage on line 2 before assignment on line 4"
     );
 }
