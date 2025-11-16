@@ -252,20 +252,22 @@ impl LanguageServer for Backend {
                     position.character,
                 );
 
-                let references = if let Some(definition) = target_definition {
-                    info!(
-                        "Found definition at {:?}:{}, finding references that resolve to it",
-                        definition.file_path, definition.line
-                    );
-                    // Find only references that resolve to this specific definition
-                    self.fixture_db.find_references_for_definition(&definition)
-                } else {
-                    info!("No specific definition found, finding all references by name");
-                    // Fallback to finding all references by name
-                    self.fixture_db.find_fixture_references(&fixture_name)
-                };
+                let (references, definition_to_include) =
+                    if let Some(definition) = target_definition {
+                        info!(
+                            "Found definition at {:?}:{}, finding references that resolve to it",
+                            definition.file_path, definition.line
+                        );
+                        // Find only references that resolve to this specific definition
+                        let refs = self.fixture_db.find_references_for_definition(&definition);
+                        (refs, Some(definition))
+                    } else {
+                        info!("No specific definition found, finding all references by name");
+                        // Fallback to finding all references by name
+                        (self.fixture_db.find_fixture_references(&fixture_name), None)
+                    };
 
-                if references.is_empty() {
+                if references.is_empty() && definition_to_include.is_none() {
                     info!("No references found for fixture: {}", fixture_name);
                     return Ok(None);
                 }
@@ -278,7 +280,38 @@ impl LanguageServer for Backend {
 
                 // Convert references to LSP Locations
                 let mut locations = Vec::new();
-                for reference in references {
+
+                // First, add the definition if we have one (LSP spec: includeDeclaration)
+                if let Some(ref def) = definition_to_include {
+                    let def_uri = match Url::from_file_path(&def.file_path) {
+                        Ok(uri) => uri,
+                        Err(_) => {
+                            warn!(
+                                "Failed to convert definition path to URI: {:?}",
+                                def.file_path
+                            );
+                            return Ok(None);
+                        }
+                    };
+
+                    let def_location = Location {
+                        uri: def_uri,
+                        range: Range {
+                            start: Position {
+                                line: (def.line.saturating_sub(1)) as u32,
+                                character: 0,
+                            },
+                            end: Position {
+                                line: (def.line.saturating_sub(1)) as u32,
+                                character: 0,
+                            },
+                        },
+                    };
+                    locations.push(def_location);
+                }
+
+                // Then add all the usage references
+                for reference in &references {
                     let ref_uri = match Url::from_file_path(&reference.file_path) {
                         Ok(uri) => uri,
                         Err(_) => {
@@ -303,7 +336,16 @@ impl LanguageServer for Backend {
                     locations.push(location);
                 }
 
-                info!("Returning {} locations", locations.len());
+                info!(
+                    "Returning {} locations ({} definition + {} references)",
+                    locations.len(),
+                    if definition_to_include.is_some() {
+                        1
+                    } else {
+                        0
+                    },
+                    references.len()
+                );
                 return Ok(Some(locations));
             } else {
                 info!("No fixture found at this position");

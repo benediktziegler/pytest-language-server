@@ -1670,4 +1670,128 @@ def test_xxx(
         let def = result.unwrap();
         assert_eq!(def.name, "foo");
     }
+
+    #[test]
+    fn test_find_references_from_usage() {
+        let db = FixtureDatabase::new();
+
+        // Simple fixture and usage in the same file
+        let test_content = r#"
+import pytest
+
+@pytest.fixture
+def foo(): ...
+
+
+def test_xxx(foo):
+    pass
+"#;
+        let test_path = PathBuf::from("/tmp/test/test_example.py");
+        db.analyze_file(test_path.clone(), test_content);
+
+        // Get the foo definition
+        let foo_defs = db.definitions.get("foo").unwrap();
+        assert_eq!(foo_defs.len(), 1, "Should have exactly one foo definition");
+        let foo_def = &foo_defs[0];
+        assert_eq!(foo_def.line, 5, "foo definition should be on line 5");
+
+        // Get references for the definition
+        let refs_from_def = db.find_references_for_definition(foo_def);
+        println!("References from definition:");
+        for r in &refs_from_def {
+            println!("  {} at line {}", r.name, r.line);
+        }
+
+        assert_eq!(
+            refs_from_def.len(),
+            1,
+            "Should find 1 usage reference (test_xxx parameter)"
+        );
+        assert_eq!(refs_from_def[0].line, 8, "Usage should be on line 8");
+
+        // Now simulate what happens when user clicks on the usage (line 8, char 13 - the 'f' in 'foo')
+        // This is LSP line 7 (0-indexed)
+        let fixture_name = db.find_fixture_at_position(&test_path, 7, 13);
+        println!(
+            "\nfind_fixture_at_position(line 7, char 13): {:?}",
+            fixture_name
+        );
+
+        assert_eq!(
+            fixture_name,
+            Some("foo".to_string()),
+            "Should find fixture name at usage position"
+        );
+
+        let resolved_def = db.find_fixture_definition(&test_path, 7, 13);
+        println!(
+            "\nfind_fixture_definition(line 7, char 13): {:?}",
+            resolved_def.as_ref().map(|d| (d.line, &d.file_path))
+        );
+
+        assert!(resolved_def.is_some(), "Should resolve usage to definition");
+        assert_eq!(
+            resolved_def.unwrap(),
+            *foo_def,
+            "Should resolve to the correct definition"
+        );
+    }
+
+    #[test]
+    fn test_find_references_with_ellipsis_body() {
+        // This reproduces the structure from strawberry test_codegen.py
+        let db = FixtureDatabase::new();
+
+        let test_content = r#"@pytest.fixture
+def foo(): ...
+
+
+def test_xxx(foo):
+    pass
+"#;
+        let test_path = PathBuf::from("/tmp/test/test_codegen.py");
+        db.analyze_file(test_path.clone(), test_content);
+
+        // Check what line foo definition is on
+        let foo_defs = db.definitions.get("foo");
+        println!(
+            "foo definitions: {:?}",
+            foo_defs
+                .as_ref()
+                .map(|defs| defs.iter().map(|d| d.line).collect::<Vec<_>>())
+        );
+
+        // Check what line foo usage is on
+        if let Some(usages) = db.usages.get(&test_path) {
+            println!("usages:");
+            for u in usages.iter() {
+                println!("  {} at line {}", u.name, u.line);
+            }
+        }
+
+        assert!(foo_defs.is_some(), "Should find foo definition");
+        let foo_def = &foo_defs.unwrap()[0];
+
+        // Get the usage line
+        let usages = db.usages.get(&test_path).unwrap();
+        let foo_usage = usages.iter().find(|u| u.name == "foo").unwrap();
+
+        // Test from usage position (LSP coordinates are 0-indexed)
+        let usage_lsp_line = (foo_usage.line - 1) as u32;
+        println!("\nTesting from usage at LSP line {}", usage_lsp_line);
+
+        let fixture_name = db.find_fixture_at_position(&test_path, usage_lsp_line, 13);
+        assert_eq!(
+            fixture_name,
+            Some("foo".to_string()),
+            "Should find foo at usage"
+        );
+
+        let def_from_usage = db.find_fixture_definition(&test_path, usage_lsp_line, 13);
+        assert!(
+            def_from_usage.is_some(),
+            "Should resolve usage to definition"
+        );
+        assert_eq!(def_from_usage.unwrap(), *foo_def);
+    }
 }
