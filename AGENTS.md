@@ -168,7 +168,7 @@ RUST_LOG=debug cargo test  # Run with debug logging
 
 ### Test Coverage
 
-- **40 total tests passing**
+- **52 total tests passing** (as of v0.5.0)
   - 28 tests in `src/fixtures.rs`
   - 12 tests in `src/main.rs`
 
@@ -209,17 +209,23 @@ cargo audit
 
 ### Version Bumping
 
-Use the provided script to bump versions across all files:
+**IMPORTANT**: Always use the provided script to bump versions across all files:
 
 ```bash
 ./bump-version.sh 0.5.0  # Updates Cargo.toml, pyproject.toml, zed-extension/
 ```
 
-This updates:
+This script automatically updates:
 - `Cargo.toml`
 - `pyproject.toml`
 - `zed-extension/Cargo.toml`
 - `zed-extension/extension.toml`
+- `Cargo.lock`
+
+The script also updates Cargo.lock and ensures all versions are synchronized. After running, commit with:
+```bash
+git add -A && git commit -m "chore: bump version to X.Y.Z"
+```
 
 ### Pre-commit Hooks
 
@@ -247,7 +253,7 @@ Install with: `pre-commit install`
    - `find_all_references()` for find-references
    - `analyze_file()` if changing what fixtures are detected
 2. Add test cases to `src/fixtures.rs` tests
-3. Run `cargo test` to ensure all 35 tests pass
+3. Run `cargo test` to ensure all 52 tests pass
 4. Consider edge cases: self-referencing fixtures, multiline signatures, conftest.py hierarchy
 
 ### Debugging LSP Issues
@@ -340,7 +346,7 @@ Critical LSP specification requirements:
 ## Troubleshooting
 
 ### Tests failing after fixture logic changes
-- Check that all 40 tests pass: `cargo test`
+- Check that all 52 tests pass: `cargo test`
 - Focus on failing tests in `fixtures.rs` (fixture resolution) or `main.rs` (LSP handlers)
 - Common issue: fixture priority rules not respecting conftest.py hierarchy
 
@@ -375,13 +381,13 @@ Critical LSP specification requirements:
 
 ## Version History
 
-- **v0.5.0** (In Development) - Undeclared fixture diagnostics and code actions
-- **v0.4.0** - Character-position aware references, LSP spec compliance
+- **v0.5.0** (November 2025) - Undeclared fixture diagnostics, code actions (quick fixes), line-aware scoping, LSP compliance improvements
+- **v0.4.0** (November 2025) - Character-position aware references, LSP spec compliance
 - **v0.3.1** - Previous stable release
 - See GitHub releases for full changelog
 
 ---
 
-**Last Updated**: v0.4.0 (November 2025)
+**Last Updated**: v0.5.0 (November 2025)
 
 This document should be updated when making significant architectural changes or adding new features.
