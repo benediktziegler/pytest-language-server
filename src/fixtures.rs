@@ -654,6 +654,24 @@ impl FixtureDatabase {
         None
     }
 
+    /// Public method to get the fixture definition at a specific line and name
+    /// Used when cursor is on a fixture definition line (not a usage)
+    pub fn get_definition_at_line(
+        &self,
+        file_path: &Path,
+        line: usize,
+        fixture_name: &str,
+    ) -> Option<FixtureDefinition> {
+        if let Some(definitions) = self.definitions.get(fixture_name) {
+            for def in definitions.iter() {
+                if def.file_path == file_path && def.line == line {
+                    return Some(def.clone());
+                }
+            }
+        }
+        None
+    }
+
     fn find_closest_definition(
         &self,
         file_path: &Path,
