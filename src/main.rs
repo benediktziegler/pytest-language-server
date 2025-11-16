@@ -239,12 +239,31 @@ impl LanguageServer for Backend {
                 position.character,
             ) {
                 info!(
-                    "Found fixture: {}, searching for all references",
+                    "Found fixture: {}, determining which definition to use",
                     fixture_name
                 );
 
-                // Find all references to this fixture
-                let references = self.fixture_db.find_fixture_references(&fixture_name);
+                // Determine which specific definition the user is referring to
+                // This could be a definition (if they clicked on the fixture name in a def line)
+                // or a usage (in which case we need to resolve it)
+                let target_definition = self.fixture_db.find_fixture_definition(
+                    &file_path,
+                    position.line,
+                    position.character,
+                );
+
+                let references = if let Some(definition) = target_definition {
+                    info!(
+                        "Found definition at {:?}:{}, finding references that resolve to it",
+                        definition.file_path, definition.line
+                    );
+                    // Find only references that resolve to this specific definition
+                    self.fixture_db.find_references_for_definition(&definition)
+                } else {
+                    info!("No specific definition found, finding all references by name");
+                    // Fallback to finding all references by name
+                    self.fixture_db.find_fixture_references(&fixture_name)
+                };
 
                 if references.is_empty() {
                     info!("No references found for fixture: {}", fixture_name);
