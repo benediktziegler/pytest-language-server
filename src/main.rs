@@ -1133,4 +1133,141 @@ def test_two(cli_runner):
             );
         }
     }
+
+    #[test]
+    fn test_fixture_override_in_test_file_not_conftest() {
+        // This reproduces the strawberry test_codegen.py scenario:
+        // A test file that defines a fixture overriding a parent from conftest
+        use pytest_language_server::FixtureDatabase;
+
+        let db = FixtureDatabase::new();
+
+        // Parent in conftest
+        let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def cli_runner():
+    return "parent"
+"#;
+        let conftest_path = PathBuf::from("/tmp/project/tests/cli/conftest.py");
+        db.analyze_file(conftest_path.clone(), conftest_content);
+
+        // Test file with fixture override AND tests using it
+        let test_content = r#"
+import pytest
+
+@pytest.fixture
+def cli_runner(cli_runner):
+    return cli_runner
+
+def test_one(cli_runner):
+    pass
+
+def test_two(cli_runner):
+    pass
+
+def test_three(cli_runner):
+    pass
+"#;
+        let test_path = PathBuf::from("/tmp/project/tests/cli/test_codegen.py");
+        db.analyze_file(test_path.clone(), test_content);
+
+        println!(
+            "\n=== SCENARIO 1: Click on child fixture definition (function name) in test file ==="
+        );
+        // Line 5 (1-indexed) = line 4 (0-indexed), "def cli_runner"
+        let fixture_name = db.find_fixture_at_position(&test_path, 4, 4);
+        println!("Fixture name: {:?}", fixture_name);
+        assert_eq!(fixture_name, Some("cli_runner".to_string()));
+
+        let child_def = db.get_definition_at_line(&test_path, 5, "cli_runner");
+        println!(
+            "Child def: {:?}",
+            child_def.as_ref().map(|d| (&d.file_path, d.line))
+        );
+        assert!(
+            child_def.is_some(),
+            "Should find child definition in test file"
+        );
+
+        if let Some(child_def) = child_def {
+            let refs = db.find_references_for_definition(&child_def);
+            println!("Child references count: {}", refs.len());
+            for r in &refs {
+                println!("  {:?}:{}", r.file_path, r.line);
+            }
+
+            // Should only have references from the SAME FILE (test_one, test_two, test_three)
+            // Should NOT have references from other files
+            let same_file_refs: Vec<_> = refs.iter().filter(|r| r.file_path == test_path).collect();
+            let other_file_refs: Vec<_> =
+                refs.iter().filter(|r| r.file_path != test_path).collect();
+
+            assert_eq!(
+                same_file_refs.len(),
+                3,
+                "Child should have 3 references in same file"
+            );
+            assert!(
+                other_file_refs.is_empty(),
+                "Child should NOT have references from other files"
+            );
+        }
+
+        println!(
+            "\n=== SCENARIO 2: Click on child fixture parameter (points to parent) in test file ==="
+        );
+        // Line 5, char 19 is the parameter "cli_runner"
+        let parent_def = db.find_fixture_definition(&test_path, 4, 19);
+        println!(
+            "Parent def via child param: {:?}",
+            parent_def.as_ref().map(|d| (&d.file_path, d.line))
+        );
+
+        if let Some(parent_def) = parent_def {
+            assert_eq!(
+                parent_def.file_path, conftest_path,
+                "Parameter should resolve to parent in conftest"
+            );
+
+            let refs = db.find_references_for_definition(&parent_def);
+            println!("Parent references count: {}", refs.len());
+            for r in &refs {
+                println!("  {:?}:{}", r.file_path, r.line);
+            }
+
+            // Parent should have:
+            // 1. Child fixture parameter (line 5 in test file)
+            // NOT: test_one, test_two, test_three (they use child, not parent)
+            let test_file_refs: Vec<_> = refs.iter().filter(|r| r.file_path == test_path).collect();
+
+            // Should only have the child fixture's parameter (line 5), not the test usages
+            assert_eq!(
+                test_file_refs.len(),
+                1,
+                "Parent should have 1 reference from test file (child parameter only)"
+            );
+            assert_eq!(
+                test_file_refs[0].line, 5,
+                "Parent reference should be on line 5 (child fixture parameter)"
+            );
+        }
+
+        println!("\n=== SCENARIO 3: Click on usage in test function ===");
+        // Line 8 (1-indexed) = line 7 (0-indexed), test_one's cli_runner parameter
+        let resolved = db.find_fixture_definition(&test_path, 7, 17);
+        println!(
+            "Resolved from test: {:?}",
+            resolved.as_ref().map(|d| (&d.file_path, d.line))
+        );
+
+        if let Some(def) = resolved {
+            assert_eq!(
+                def.file_path, test_path,
+                "Test usage should resolve to child in same file"
+            );
+            assert_eq!(def.line, 5, "Should resolve to child fixture at line 5");
+        }
+    }
 }
