@@ -243,6 +243,12 @@ impl LanguageServer for Backend {
                     fixture_name
                 );
 
+                let current_line = (position.line + 1) as usize; // Convert to 1-indexed
+                info!(
+                    "Current cursor position: line {} (1-indexed), char {}",
+                    current_line, position.character
+                );
+
                 // Determine which specific definition the user is referring to
                 // This could be a usage (resolve to definition) or clicking on a definition itself
                 let target_definition = self.fixture_db.find_fixture_definition(
@@ -296,6 +302,27 @@ impl LanguageServer for Backend {
                     fixture_name
                 );
 
+                // Log all references to help debug
+                for (i, r) in references.iter().enumerate() {
+                    debug!(
+                        "  Reference {}: {:?}:{} (chars {}-{})",
+                        i,
+                        r.file_path.file_name(),
+                        r.line,
+                        r.start_char,
+                        r.end_char
+                    );
+                }
+
+                // Check if current position is in the references
+                let has_current_position = references
+                    .iter()
+                    .any(|r| r.file_path == file_path && r.line == current_line);
+                info!(
+                    "Current position (line {}) in references: {}",
+                    current_line, has_current_position
+                );
+
                 // Convert references to LSP Locations
                 let mut locations = Vec::new();
 
@@ -330,6 +357,7 @@ impl LanguageServer for Backend {
 
                 // Then add all the usage references
                 // Skip references that are on the same line as the definition (to avoid duplicates)
+                let mut skipped_count = 0;
                 for reference in &references {
                     // Check if this reference is the same location as the definition
                     if let Some(ref def) = definition_to_include {
@@ -338,6 +366,7 @@ impl LanguageServer for Backend {
                                 "Skipping reference at {:?}:{} (same as definition location)",
                                 reference.file_path, reference.line
                             );
+                            skipped_count += 1;
                             continue;
                         }
                     }
@@ -363,18 +392,27 @@ impl LanguageServer for Backend {
                             },
                         },
                     };
+                    debug!(
+                        "Adding reference location: {:?}:{} (chars {}-{})",
+                        reference.file_path.file_name(),
+                        reference.line,
+                        reference.start_char,
+                        reference.end_char
+                    );
                     locations.push(location);
                 }
 
                 info!(
-                    "Returning {} locations ({} definition + {} references)",
+                    "Returning {} locations (definition: {}, references: {}/{}, skipped: {})",
                     locations.len(),
                     if definition_to_include.is_some() {
                         1
                     } else {
                         0
                     },
-                    references.len()
+                    references.len() - skipped_count,
+                    references.len(),
+                    skipped_count
                 );
                 return Ok(Some(locations));
             } else {
@@ -1287,5 +1325,250 @@ def test_three(cli_runner):
             );
             assert_eq!(def.line, 5, "Should resolve to child fixture at line 5");
         }
+    }
+
+    #[test]
+    fn test_references_include_current_position() {
+        // LSP Spec requirement: textDocument/references should include the current position
+        // where the cursor is, whether it's a usage or a definition
+        use pytest_language_server::FixtureDatabase;
+
+        let db = FixtureDatabase::new();
+
+        let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def cli_runner():
+    return "runner"
+"#;
+        let conftest_path = PathBuf::from("/tmp/project/conftest.py");
+        db.analyze_file(conftest_path.clone(), conftest_content);
+
+        let test_content = r#"
+def test_one(cli_runner):
+    pass
+
+def test_two(cli_runner):
+    pass
+
+def test_three(cli_runner):
+    pass
+"#;
+        let test_path = PathBuf::from("/tmp/project/test_example.py");
+        db.analyze_file(test_path.clone(), test_content);
+
+        println!("\n=== TEST: Click on usage at test_one (line 2) ===");
+        // Line 2 (1-indexed), clicking on cli_runner parameter
+        let fixture_name = db.find_fixture_at_position(&test_path, 1, 13);
+        assert_eq!(fixture_name, Some("cli_runner".to_string()));
+
+        let resolved_def = db.find_fixture_definition(&test_path, 1, 13);
+        assert!(
+            resolved_def.is_some(),
+            "Should resolve to conftest definition"
+        );
+
+        let def = resolved_def.unwrap();
+        let refs = db.find_references_for_definition(&def);
+
+        println!("References found: {}", refs.len());
+        for r in &refs {
+            println!(
+                "  {:?}:{} (chars {}-{})",
+                r.file_path.file_name(),
+                r.line,
+                r.start_char,
+                r.end_char
+            );
+        }
+
+        // CRITICAL: References should include ALL usages, including the current one
+        assert_eq!(refs.len(), 3, "Should have 3 references (all test usages)");
+
+        // Verify line 2 (where we clicked) IS included
+        let line2_ref = refs
+            .iter()
+            .find(|r| r.file_path == test_path && r.line == 2);
+        assert!(
+            line2_ref.is_some(),
+            "References MUST include current position (line 2)"
+        );
+
+        // Verify other lines are also included
+        let line5_ref = refs
+            .iter()
+            .find(|r| r.file_path == test_path && r.line == 5);
+        assert!(line5_ref.is_some(), "References should include line 5");
+
+        let line8_ref = refs
+            .iter()
+            .find(|r| r.file_path == test_path && r.line == 8);
+        assert!(line8_ref.is_some(), "References should include line 8");
+
+        println!("\n=== TEST: Click on usage at test_two (line 5) ===");
+        let resolved_def = db.find_fixture_definition(&test_path, 4, 13);
+        assert!(resolved_def.is_some());
+
+        let def = resolved_def.unwrap();
+        let refs = db.find_references_for_definition(&def);
+
+        // Should still have all 3 references
+        assert_eq!(refs.len(), 3, "Should have 3 references");
+
+        // Current position (line 5) MUST be included
+        let line5_ref = refs
+            .iter()
+            .find(|r| r.file_path == test_path && r.line == 5);
+        assert!(
+            line5_ref.is_some(),
+            "References MUST include current position (line 5)"
+        );
+
+        // Simulate LSP handler logic: verify no references would be incorrectly skipped
+        // (only skip if reference is on same line as definition)
+        for r in &refs {
+            if r.file_path == def.file_path && r.line == def.line {
+                println!(
+                    "  Would skip (same as definition): {:?}:{}",
+                    r.file_path.file_name(),
+                    r.line
+                );
+            } else {
+                println!(
+                    "  Would include: {:?}:{} (chars {}-{})",
+                    r.file_path.file_name(),
+                    r.line,
+                    r.start_char,
+                    r.end_char
+                );
+            }
+        }
+
+        // In this scenario, no references should be skipped (definition is in conftest, usages in test file)
+        let would_be_skipped = refs
+            .iter()
+            .filter(|r| r.file_path == def.file_path && r.line == def.line)
+            .count();
+        assert_eq!(
+            would_be_skipped, 0,
+            "No references should be skipped in this scenario"
+        );
+
+        println!("\n=== TEST: Click on definition (line 5 in conftest) ===");
+        // When clicking on the definition itself, references should include all usages
+        let fixture_name = db.find_fixture_at_position(&conftest_path, 4, 4);
+        assert_eq!(fixture_name, Some("cli_runner".to_string()));
+
+        // This should return None (we're on definition, not usage)
+        let resolved = db.find_fixture_definition(&conftest_path, 4, 4);
+        assert!(
+            resolved.is_none(),
+            "Clicking on definition name should return None"
+        );
+
+        // Get definition at this line
+        let def = db.get_definition_at_line(&conftest_path, 5, "cli_runner");
+        assert!(def.is_some());
+
+        let def = def.unwrap();
+        let refs = db.find_references_for_definition(&def);
+
+        // Should have all 3 test usages
+        assert_eq!(refs.len(), 3, "Definition should have 3 usage references");
+
+        println!("\nAll LSP spec requirements verified ✓");
+    }
+
+    #[test]
+    fn test_references_multiline_function_signature() {
+        // Test that references work correctly with multiline function signatures
+        // This simulates the strawberry test_codegen.py scenario
+        use pytest_language_server::FixtureDatabase;
+
+        let db = FixtureDatabase::new();
+
+        let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def cli_runner():
+    return "runner"
+"#;
+        let conftest_path = PathBuf::from("/tmp/project/conftest.py");
+        db.analyze_file(conftest_path.clone(), conftest_content);
+
+        // Multiline function signature (like strawberry line 87-89)
+        let test_content = r#"
+def test_codegen(
+    cli_app: Typer, cli_runner: CliRunner, query_file_path: Path
+):
+    pass
+
+def test_another(cli_runner):
+    pass
+"#;
+        let test_path = PathBuf::from("/tmp/project/test_codegen.py");
+        db.analyze_file(test_path.clone(), test_content);
+
+        println!("\n=== TEST: Click on cli_runner in function signature (line 3, char 23) ===");
+        // Line 3 (1-indexed): "    cli_app: Typer, cli_runner: CliRunner, query_file_path: Path"
+        // Character position 23 should be in "cli_runner" (starts at ~20)
+
+        let fixture_name = db.find_fixture_at_position(&test_path, 2, 23); // 0-indexed for LSP
+        println!("Fixture at position: {:?}", fixture_name);
+        assert_eq!(
+            fixture_name,
+            Some("cli_runner".to_string()),
+            "Should find cli_runner at this position"
+        );
+
+        let resolved_def = db.find_fixture_definition(&test_path, 2, 23);
+        assert!(
+            resolved_def.is_some(),
+            "Should resolve to conftest definition"
+        );
+
+        let def = resolved_def.unwrap();
+        println!("Resolved to: {:?}:{}", def.file_path.file_name(), def.line);
+
+        let refs = db.find_references_for_definition(&def);
+        println!("\nReferences found: {}", refs.len());
+        for r in &refs {
+            println!(
+                "  {:?}:{} (chars {}-{})",
+                r.file_path.file_name(),
+                r.line,
+                r.start_char,
+                r.end_char
+            );
+        }
+
+        // Should have 2 references: line 3 (signature) and line 7 (test_another)
+        assert_eq!(
+            refs.len(),
+            2,
+            "Should have 2 references (both function signatures)"
+        );
+
+        // CRITICAL: Line 3 (where we clicked) MUST be included
+        let line3_ref = refs
+            .iter()
+            .find(|r| r.file_path == test_path && r.line == 3);
+        assert!(
+            line3_ref.is_some(),
+            "References MUST include current position (line 3 in signature)"
+        );
+
+        // Also verify line 7 (test_another) is included
+        let line7_ref = refs
+            .iter()
+            .find(|r| r.file_path == test_path && r.line == 7);
+        assert!(
+            line7_ref.is_some(),
+            "References should include test_another parameter (line 7)"
+        );
+
+        println!("\nMultiline signature test passed ✓");
     }
 }
