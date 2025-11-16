@@ -31,6 +31,8 @@ Find all usages of a fixture across your entire test suite:
 - Works from fixture definitions or usage sites
 - Character-position aware (distinguishes between fixture name and parameters)
 - Shows references in all test files
+- Correctly handles fixture overriding and hierarchies
+- **LSP spec compliant**: Always includes the current position in results
 
 ### 📚 Hover Documentation
 View fixture information on hover:
@@ -217,6 +219,31 @@ pytest-language-server correctly implements pytest's fixture shadowing rules:
 1. **Same file**: Fixtures defined in the same file have highest priority
 2. **Closest conftest.py**: Searches parent directories for conftest.py files
 3. **Virtual environment**: Third-party plugin fixtures
+
+### Fixture Overriding
+
+The LSP correctly handles complex fixture overriding scenarios:
+
+```python
+# conftest.py (parent)
+@pytest.fixture
+def cli_runner():
+    return "parent runner"
+
+# tests/conftest.py (child)
+@pytest.fixture
+def cli_runner(cli_runner):  # Overrides parent
+    return cli_runner  # Uses parent
+
+# tests/test_example.py
+def test_example(cli_runner):  # Uses child
+    pass
+```
+
+When using find-references:
+- Clicking on the **function name** `def cli_runner(...)` shows references to the child fixture
+- Clicking on the **parameter** `cli_runner(cli_runner)` shows references to the parent fixture
+- Character-position aware to distinguish between the two
 
 ## Supported Third-Party Fixtures
 
