@@ -305,12 +305,12 @@ impl FixtureDatabase {
         if let rustpython_parser::ast::Mod::Module(module) = parsed {
             debug!("Module has {} statements", module.body.len());
 
-            // First pass: collect all imports
-            let mut imports = std::collections::HashSet::new();
+            // First pass: collect all module-level names (imports, assignments, function/class defs)
+            let mut module_level_names = std::collections::HashSet::new();
             for stmt in &module.body {
-                self.collect_imports(stmt, &mut imports);
+                self.collect_module_level_names(stmt, &mut module_level_names);
             }
-            self.imports.insert(file_path.clone(), imports);
+            self.imports.insert(file_path.clone(), module_level_names);
 
             // Second pass: analyze fixtures and tests
             for stmt in &module.body {
@@ -605,21 +605,60 @@ impl FixtureDatabase {
         }
     }
 
-    fn collect_imports(&self, stmt: &Stmt, imports: &mut std::collections::HashSet<String>) {
+    fn collect_module_level_names(
+        &self,
+        stmt: &Stmt,
+        names: &mut std::collections::HashSet<String>,
+    ) {
         match stmt {
+            // Imports
             Stmt::Import(import_stmt) => {
                 for alias in &import_stmt.names {
                     // If there's an "as" alias, use that; otherwise use the original name
                     let name = alias.asname.as_ref().unwrap_or(&alias.name);
-                    imports.insert(name.to_string());
+                    names.insert(name.to_string());
                 }
             }
             Stmt::ImportFrom(import_from) => {
                 for alias in &import_from.names {
                     // If there's an "as" alias, use that; otherwise use the original name
                     let name = alias.asname.as_ref().unwrap_or(&alias.name);
-                    imports.insert(name.to_string());
+                    names.insert(name.to_string());
                 }
+            }
+            // Regular function definitions (not fixtures)
+            Stmt::FunctionDef(func_def) => {
+                // Check if this is NOT a fixture
+                let is_fixture = func_def
+                    .decorator_list
+                    .iter()
+                    .any(Self::is_fixture_decorator);
+                if !is_fixture {
+                    names.insert(func_def.name.to_string());
+                }
+            }
+            // Async function definitions (not fixtures)
+            Stmt::AsyncFunctionDef(func_def) => {
+                let is_fixture = func_def
+                    .decorator_list
+                    .iter()
+                    .any(Self::is_fixture_decorator);
+                if !is_fixture {
+                    names.insert(func_def.name.to_string());
+                }
+            }
+            // Class definitions
+            Stmt::ClassDef(class_def) => {
+                names.insert(class_def.name.to_string());
+            }
+            // Module-level assignments
+            Stmt::Assign(assign) => {
+                for target in &assign.targets {
+                    self.collect_names_from_expr(target, names);
+                }
+            }
+            Stmt::AnnAssign(ann_assign) => {
+                self.collect_names_from_expr(&ann_assign.target, names);
             }
             _ => {}
         }
@@ -3534,4 +3573,118 @@ def test_using_fixture_directly():
     );
     assert_eq!(undeclared[0].name, "foo");
     assert_eq!(undeclared[0].function_name, "test_using_fixture_directly");
+}
+
+#[test]
+fn test_no_false_positive_for_module_level_assignment() {
+    // Should not warn if name is assigned at module level (not a fixture)
+    let db = FixtureDatabase::new();
+
+    // Add fixture in conftest
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def foo():
+    return "fixture"
+"#;
+    let conftest_path = PathBuf::from("/tmp/conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    // Test file that has a module-level assignment
+    let test_content = r#"
+# Module-level assignment
+foo = SomeClass()
+
+def test_with_module_var():
+    result = foo.method()
+    assert result == "value"
+"#;
+    let test_path = PathBuf::from("/tmp/test_example.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Should NOT detect undeclared fixture because foo is assigned at module level
+    let undeclared = db.get_undeclared_fixtures(&test_path);
+
+    assert_eq!(
+        undeclared.len(),
+        0,
+        "Should not detect undeclared fixture when name is assigned at module level"
+    );
+}
+
+#[test]
+fn test_no_false_positive_for_function_definition() {
+    // Should not warn if name is a regular function (not a fixture)
+    let db = FixtureDatabase::new();
+
+    // Add fixture in conftest
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def foo():
+    return "fixture"
+"#;
+    let conftest_path = PathBuf::from("/tmp/conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    // Test file that has a regular function with the same name
+    let test_content = r#"
+def foo():
+    return "not a fixture"
+
+def test_with_function():
+    result = foo()
+    assert result == "not a fixture"
+"#;
+    let test_path = PathBuf::from("/tmp/test_example.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Should NOT detect undeclared fixture because foo is a regular function
+    let undeclared = db.get_undeclared_fixtures(&test_path);
+
+    assert_eq!(
+        undeclared.len(),
+        0,
+        "Should not detect undeclared fixture when name is a regular function"
+    );
+}
+
+#[test]
+fn test_no_false_positive_for_class_definition() {
+    // Should not warn if name is a class
+    let db = FixtureDatabase::new();
+
+    // Add fixture in conftest
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def MyClass():
+    return "fixture"
+"#;
+    let conftest_path = PathBuf::from("/tmp/conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    // Test file that has a class with the same name
+    let test_content = r#"
+class MyClass:
+    pass
+
+def test_with_class():
+    obj = MyClass()
+    assert obj is not None
+"#;
+    let test_path = PathBuf::from("/tmp/test_example.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Should NOT detect undeclared fixture because MyClass is a class
+    let undeclared = db.get_undeclared_fixtures(&test_path);
+
+    assert_eq!(
+        undeclared.len(),
+        0,
+        "Should not detect undeclared fixture when name is a class"
+    );
 }

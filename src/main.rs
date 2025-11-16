@@ -523,10 +523,37 @@ impl LanguageServer for Backend {
                                     change_annotations: None,
                                 };
 
+                                // Create the diagnostic that this code action applies to
+                                let diagnostic = Diagnostic {
+                                    range: Range {
+                                        start: Position {
+                                            line: fixture_line,
+                                            character: fixture_start_char,
+                                        },
+                                        end: Position {
+                                            line: fixture_line,
+                                            character: fixture.end_char as u32,
+                                        },
+                                    },
+                                    severity: Some(DiagnosticSeverity::WARNING),
+                                    code: Some(NumberOrString::String(
+                                        "undeclared-fixture".to_string(),
+                                    )),
+                                    code_description: None,
+                                    source: Some("pytest-lsp".to_string()),
+                                    message: format!(
+                                        "Fixture '{}' is used but not declared as a parameter",
+                                        fixture.name
+                                    ),
+                                    related_information: None,
+                                    tags: None,
+                                    data: None,
+                                };
+
                                 let action = CodeAction {
                                     title: format!("Add '{}' fixture parameter", fixture.name),
                                     kind: Some(CodeActionKind::QUICKFIX),
-                                    diagnostics: None,
+                                    diagnostics: Some(vec![diagnostic]),
                                     edit: Some(edit),
                                     command: None,
                                     is_preferred: Some(true),
@@ -574,7 +601,7 @@ impl Backend {
                         },
                     },
                     severity: Some(DiagnosticSeverity::WARNING),
-                    code: None,
+                    code: Some(NumberOrString::String("undeclared-fixture".to_string())),
                     code_description: None,
                     source: Some("pytest-lsp".to_string()),
                     message: format!(
