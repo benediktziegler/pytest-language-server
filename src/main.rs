@@ -1,6 +1,4 @@
-mod fixtures;
-
-use fixtures::FixtureDatabase;
+use pytest_language_server::FixtureDatabase;
 use std::sync::Arc;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
@@ -333,4 +331,104 @@ async fn main() {
 
     info!("LSP server ready");
     Server::new(stdin, stdout, socket).serve(service).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use pytest_language_server::FixtureDefinition;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_hover_content_with_leading_newline() {
+        // Create a mock fixture definition with docstring
+        let definition = FixtureDefinition {
+            name: "my_fixture".to_string(),
+            file_path: PathBuf::from("/tmp/test/conftest.py"),
+            line: 4,
+            docstring: Some("This is a test fixture.\n\nIt does something useful.".to_string()),
+        };
+
+        // Build hover content (same logic as hover method)
+        let mut content = String::new();
+
+        // Header with fixture name
+        content.push_str(&format!(
+            "```python\n@pytest.fixture\ndef {}(...):\n```\n",
+            definition.name
+        ));
+
+        // Add file path
+        if let Some(file_name) = definition.file_path.file_name() {
+            content.push_str(&format!(
+                "\n**Defined in:** `{}`\n",
+                file_name.to_string_lossy()
+            ));
+        }
+
+        // Add docstring if present
+        if let Some(ref docstring) = definition.docstring {
+            content.push_str("\n---\n\n");
+            content.push_str(docstring);
+        }
+
+        // Verify the structure with empty line after code block
+        let lines: Vec<&str> = content.lines().collect();
+
+        // The structure should be:
+        // 0: ```python
+        // 1: @pytest.fixture
+        // 2: def my_fixture(...):
+        // 3: ```
+        // 4: (empty line)
+        // 5: **Defined in:** `conftest.py`
+        // 6: (empty line from \n---\n)
+        // 7: ---
+        // 8: (empty line)
+        // 9+: docstring content
+
+        assert_eq!(lines[0], "```python");
+        assert_eq!(lines[1], "@pytest.fixture");
+        assert!(lines[2].starts_with("def my_fixture"));
+        assert_eq!(lines[3], "```");
+        assert_eq!(lines[4], ""); // Empty line after code block
+        assert!(
+            lines[5].starts_with("**Defined in:**"),
+            "Line 5 should be 'Defined in', got: '{}'",
+            lines[5]
+        );
+    }
+
+    #[test]
+    fn test_hover_content_structure_without_docstring() {
+        // Create a mock fixture definition without docstring
+        let definition = FixtureDefinition {
+            name: "simple_fixture".to_string(),
+            file_path: PathBuf::from("/tmp/test/conftest.py"),
+            line: 4,
+            docstring: None,
+        };
+
+        // Build hover content
+        let mut content = String::new();
+
+        content.push_str(&format!(
+            "```python\n@pytest.fixture\ndef {}(...):\n```\n",
+            definition.name
+        ));
+
+        if let Some(file_name) = definition.file_path.file_name() {
+            content.push_str(&format!(
+                "\n**Defined in:** `{}`\n",
+                file_name.to_string_lossy()
+            ));
+        }
+
+        // For a fixture without docstring, the content should end with "Defined in"
+        // with an empty line before it
+        let lines: Vec<&str> = content.lines().collect();
+
+        assert_eq!(lines.len(), 6); // code block (4 lines) + empty line + defined in (1 line)
+        assert_eq!(lines[4], ""); // Empty line
+        assert!(lines[5].starts_with("**Defined in:**"));
+    }
 }

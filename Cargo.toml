@@ -10,6 +10,14 @@ repository = "https://github.com/bellini666/pytest-language-server"
 keywords = ["pytest", "lsp", "language-server", "testing"]
 categories = ["development-tools", "development-tools::testing"]
 
+[[bin]]
+name = "pytest-language-server"
+path = "src/main.rs"
+
+[lib]
+name = "pytest_language_server"
+path = "src/lib.rs"
+
 [dependencies]
 tower-lsp = "0.20.0"
 tokio = { version = "1.48", features = ["full"] }

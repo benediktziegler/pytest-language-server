@@ -29,6 +29,12 @@ pub struct FixtureDatabase {
     usages: Arc<DashMap<PathBuf, Vec<FixtureUsage>>>,
 }
 
+impl Default for FixtureDatabase {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FixtureDatabase {
     pub fn new() -> Self {
         Self {
