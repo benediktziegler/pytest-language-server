@@ -19,6 +19,8 @@ pub struct FixtureUsage {
     pub name: String,
     pub file_path: PathBuf,
     pub line: usize,
+    pub start_char: usize, // Character position where this usage starts (on the line)
+    pub end_char: usize,   // Character position where this usage ends (on the line)
 }
 
 #[derive(Debug)]
@@ -363,16 +365,22 @@ impl FixtureDatabase {
                     // arg.def.range contains the location of the parameter name
                     let arg_line =
                         self.get_line_from_offset(arg.def.range.start().to_usize(), content);
+                    let start_char = self
+                        .get_char_position_from_offset(arg.def.range.start().to_usize(), content);
+                    let end_char =
+                        self.get_char_position_from_offset(arg.def.range.end().to_usize(), content);
 
                     info!(
-                        "Found fixture dependency: {} at {:?}:{}",
-                        arg_name, file_path, arg_line
+                        "Found fixture dependency: {} at {:?}:{}:{}",
+                        arg_name, file_path, arg_line, start_char
                     );
 
                     let usage = FixtureUsage {
                         name: arg_name.to_string(),
                         file_path: file_path.clone(),
                         line: arg_line, // Use actual parameter line
+                        start_char,
+                        end_char,
                     };
 
                     self.usages
@@ -396,20 +404,25 @@ impl FixtureDatabase {
                     // arg.def.range contains the location of the parameter name
                     let arg_offset = arg.def.range.start().to_usize();
                     let arg_line = self.get_line_from_offset(arg_offset, content);
+                    let start_char = self.get_char_position_from_offset(arg_offset, content);
+                    let end_char =
+                        self.get_char_position_from_offset(arg.def.range.end().to_usize(), content);
 
                     debug!(
-                        "Parameter {} at offset {}, calculated line {}",
-                        arg_name, arg_offset, arg_line
+                        "Parameter {} at offset {}, calculated line {}, char {}",
+                        arg_name, arg_offset, arg_line, start_char
                     );
                     info!(
-                        "Found fixture usage: {} at {:?}:{}",
-                        arg_name, file_path, arg_line
+                        "Found fixture usage: {} at {:?}:{}:{}",
+                        arg_name, file_path, arg_line, start_char
                     );
 
                     let usage = FixtureUsage {
                         name: arg_name.to_string(),
                         file_path: file_path.clone(),
                         line: arg_line, // Use actual parameter line
+                        start_char,
+                        end_char,
                     };
 
                     // Append to existing usages for this file
@@ -573,6 +586,17 @@ impl FixtureDatabase {
         content[..offset].matches('\n').count() + 1
     }
 
+    fn get_char_position_from_offset(&self, offset: usize, content: &str) -> usize {
+        // Find the last newline before this offset
+        if let Some(line_start) = content[..offset].rfind('\n') {
+            // Character position is offset from start of line (after the newline)
+            offset - line_start - 1
+        } else {
+            // No newline found, we're on the first line
+            offset
+        }
+    }
+
     /// Find fixture definition for a given position in a file
     pub fn find_fixture_definition(
         &self,
@@ -611,25 +635,36 @@ impl FixtureDatabase {
         let current_fixture_def = self.get_fixture_definition_at_line(file_path, target_line);
 
         // First, check if this word matches any fixture usage on this line
+        // AND that the cursor is within the character range of that usage
         if let Some(usages) = self.usages.get(file_path) {
             for usage in usages.iter() {
                 if usage.line == target_line && usage.name == word_at_cursor {
-                    info!("Found fixture usage at cursor position: {}", usage.name);
+                    // Check if cursor is within the character range of this usage
+                    let cursor_pos = character as usize;
+                    if cursor_pos >= usage.start_char && cursor_pos < usage.end_char {
+                        debug!(
+                            "Cursor at {} is within usage range {}-{}: {}",
+                            cursor_pos, usage.start_char, usage.end_char, usage.name
+                        );
+                        info!("Found fixture usage at cursor position: {}", usage.name);
 
-                    // If we're in a fixture definition with the same name, skip it when searching
-                    if let Some(ref current_def) = current_fixture_def {
-                        if current_def.name == word_at_cursor {
-                            info!("Self-referencing fixture detected, finding parent definition");
-                            return self.find_closest_definition_excluding(
-                                file_path,
-                                &usage.name,
-                                Some(current_def),
-                            );
+                        // If we're in a fixture definition with the same name, skip it when searching
+                        if let Some(ref current_def) = current_fixture_def {
+                            if current_def.name == word_at_cursor {
+                                info!(
+                                    "Self-referencing fixture detected, finding parent definition"
+                                );
+                                return self.find_closest_definition_excluding(
+                                    file_path,
+                                    &usage.name,
+                                    Some(current_def),
+                                );
+                            }
                         }
-                    }
 
-                    // Find the closest definition for this fixture
-                    return self.find_closest_definition(file_path, &usage.name);
+                        // Find the closest definition for this fixture
+                        return self.find_closest_definition(file_path, &usage.name);
+                    }
                 }
             }
         }
@@ -868,14 +903,19 @@ impl FixtureDatabase {
         debug!("Word at cursor: {:?}", word_at_cursor);
 
         // Check if this word matches any fixture usage on this line
+        // AND that the cursor is within the character range of that usage
         if let Some(usages) = self.usages.get(file_path) {
             for usage in usages.iter() {
                 if usage.line == target_line {
-                    if let Some(ref word) = word_at_cursor {
-                        if word == &usage.name {
-                            info!("Found fixture usage at cursor position: {}", usage.name);
-                            return Some(usage.name.clone());
-                        }
+                    // Check if cursor is within the character range of this usage
+                    let cursor_pos = character as usize;
+                    if cursor_pos >= usage.start_char && cursor_pos < usage.end_char {
+                        debug!(
+                            "Cursor at {} is within usage range {}-{}: {}",
+                            cursor_pos, usage.start_char, usage.end_char, usage.name
+                        );
+                        info!("Found fixture usage at cursor position: {}", usage.name);
+                        return Some(usage.name.clone());
                     }
                 }
             }
@@ -2332,5 +2372,130 @@ def test_uses_override(base):
         let override_def = defs.iter().find(|d| d.line == 9).unwrap();
         println!("Override def at line: {}", override_def.line);
         assert_eq!(resolved.as_ref(), Some(override_def));
+    }
+
+    #[test]
+    fn test_cursor_position_on_definition_line() {
+        // Debug test to understand what happens at different cursor positions
+        // on a fixture definition line with a self-referencing parameter
+        let db = FixtureDatabase::new();
+
+        // Add a parent conftest with parent fixture
+        let parent_content = r#"
+import pytest
+
+@pytest.fixture
+def cli_runner():
+    return "parent"
+"#;
+        let parent_conftest = PathBuf::from("/tmp/conftest.py");
+        db.analyze_file(parent_conftest.clone(), parent_content);
+
+        let content = r#"
+import pytest
+
+@pytest.fixture
+def cli_runner(cli_runner):
+    return cli_runner
+"#;
+        let test_path = PathBuf::from("/tmp/test/test_example.py");
+        db.analyze_file(test_path.clone(), content);
+
+        // Line 5 (1-indexed): "def cli_runner(cli_runner):"
+        // Position 0: 'd' in def
+        // Position 4: 'c' in cli_runner (function name)
+        // Position 15: '('
+        // Position 16: 'c' in cli_runner (parameter name)
+
+        println!("\n=== Testing character positions on line 5 ===");
+
+        // Check usages
+        if let Some(usages) = db.usages.get(&test_path) {
+            println!("\nUsages found:");
+            for u in usages.iter() {
+                println!(
+                    "  {} at line {}, chars {}-{}",
+                    u.name, u.line, u.start_char, u.end_char
+                );
+            }
+        } else {
+            println!("\nNo usages found!");
+        }
+
+        // Test clicking on function name 'cli_runner' - should be treated as definition
+        let line_content = "def cli_runner(cli_runner):";
+        println!("\nLine content: '{}'", line_content);
+
+        // Position 4 = 'c' in function name cli_runner
+        println!("\nPosition 4 (function name):");
+        let word_at_4 = db.extract_word_at_position(line_content, 4);
+        println!("  Word at cursor: {:?}", word_at_4);
+        let fixture_name_at_4 = db.find_fixture_at_position(&test_path, 4, 4);
+        println!("  find_fixture_at_position: {:?}", fixture_name_at_4);
+        let resolved_4 = db.find_fixture_definition(&test_path, 4, 4); // Line 5 = index 4
+        println!(
+            "  Resolved: {:?}",
+            resolved_4.as_ref().map(|d| (d.name.as_str(), d.line))
+        );
+
+        // Position 16 = 'c' in parameter name cli_runner
+        println!("\nPosition 16 (parameter name):");
+        let word_at_16 = db.extract_word_at_position(line_content, 16);
+        println!("  Word at cursor: {:?}", word_at_16);
+
+        // Manual check: does the usage check work?
+        if let Some(usages) = db.usages.get(&test_path) {
+            for usage in usages.iter() {
+                println!("  Checking usage: {} at line {}", usage.name, usage.line);
+                if usage.line == 5 && usage.name == "cli_runner" {
+                    println!("    MATCH! Usage matches our position");
+                }
+            }
+        }
+
+        let fixture_name_at_16 = db.find_fixture_at_position(&test_path, 4, 16);
+        println!("  find_fixture_at_position: {:?}", fixture_name_at_16);
+        let resolved_16 = db.find_fixture_definition(&test_path, 4, 16); // Line 5 = index 4
+        println!(
+            "  Resolved: {:?}",
+            resolved_16.as_ref().map(|d| (d.name.as_str(), d.line))
+        );
+
+        // Expected behavior:
+        // - Position 4 (function name): should resolve to CHILD (line 5) - we're ON the definition
+        // - Position 16 (parameter): should resolve to PARENT (line 5 in conftest) - it's a usage
+
+        assert_eq!(word_at_4, Some("cli_runner".to_string()));
+        assert_eq!(word_at_16, Some("cli_runner".to_string()));
+
+        // Check the actual resolution
+        println!("\n=== ACTUAL vs EXPECTED ===");
+        println!("Position 4 (function name):");
+        println!(
+            "  Actual: {:?}",
+            resolved_4.as_ref().map(|d| (&d.file_path, d.line))
+        );
+        println!("  Expected: test file, line 5 (the child definition itself)");
+
+        println!("\nPosition 16 (parameter):");
+        println!(
+            "  Actual: {:?}",
+            resolved_16.as_ref().map(|d| (&d.file_path, d.line))
+        );
+        println!("  Expected: conftest, line 5 (the parent definition)");
+
+        // The BUG: both return the same thing (child at line 5)
+        // Position 4: returning child is CORRECT (though find_fixture_definition returns None,
+        //             main.rs falls back to get_definition_at_line which is correct)
+        // Position 16: returning child is WRONG - should return parent (line 5 in conftest)
+
+        if let Some(ref def) = resolved_16 {
+            assert_eq!(
+                def.file_path, parent_conftest,
+                "Parameter should resolve to parent definition"
+            );
+        } else {
+            panic!("Position 16 (parameter) should resolve to parent definition");
+        }
     }
 }
