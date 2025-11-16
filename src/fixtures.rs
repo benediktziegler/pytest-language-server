@@ -356,19 +356,23 @@ impl FixtureDatabase {
                 .push(definition);
 
             // Fixtures can depend on other fixtures - record these as usages too
-            let func_line = self.get_line_from_offset(range.start().to_usize(), content);
             for arg in &args.args {
                 let arg_name = arg.def.arg.as_str();
                 if arg_name != "self" && arg_name != "request" {
+                    // Get the actual line where this parameter appears
+                    // arg.def.range contains the location of the parameter name
+                    let arg_line =
+                        self.get_line_from_offset(arg.def.range.start().to_usize(), content);
+
                     info!(
                         "Found fixture dependency: {} at {:?}:{}",
-                        arg_name, file_path, func_line
+                        arg_name, file_path, arg_line
                     );
 
                     let usage = FixtureUsage {
                         name: arg_name.to_string(),
                         file_path: file_path.clone(),
-                        line: func_line,
+                        line: arg_line, // Use actual parameter line
                     };
 
                     self.usages
@@ -382,23 +386,30 @@ impl FixtureDatabase {
         // Check if this is a test function
         if func_name.starts_with("test_") {
             debug!("Found test function: {}", func_name);
-            // Use the function definition line for all parameters
-            // This way when user is on the function def line, we find the fixtures
-            let func_line = self.get_line_from_offset(range.start().to_usize(), content);
 
             // Extract fixture usages from function parameters
             for arg in &args.args {
                 let arg_name = arg.def.arg.as_str();
                 if arg_name != "self" {
+                    // Get the actual line where this parameter appears
+                    // This handles multiline function signatures correctly
+                    // arg.def.range contains the location of the parameter name
+                    let arg_offset = arg.def.range.start().to_usize();
+                    let arg_line = self.get_line_from_offset(arg_offset, content);
+
+                    debug!(
+                        "Parameter {} at offset {}, calculated line {}",
+                        arg_name, arg_offset, arg_line
+                    );
                     info!(
                         "Found fixture usage: {} at {:?}:{}",
-                        arg_name, file_path, func_line
+                        arg_name, file_path, arg_line
                     );
 
                     let usage = FixtureUsage {
                         name: arg_name.to_string(),
                         file_path: file_path.clone(),
-                        line: func_line, // Use function line, not parameter line
+                        line: arg_line, // Use actual parameter line
                     };
 
                     // Append to existing usages for this file
@@ -558,7 +569,8 @@ impl FixtureDatabase {
     }
 
     fn get_line_from_offset(&self, offset: usize, content: &str) -> usize {
-        content[..offset].lines().count() + 1 // 1-based line numbers
+        // Count newlines before this offset, then add 1 for 1-based line numbers
+        content[..offset].matches('\n').count() + 1
     }
 
     /// Find fixture definition for a given position in a file
@@ -1600,5 +1612,62 @@ def test_sub2(shared_fixture):
             3,
             "Should find 3 total references across all scopes"
         );
+    }
+
+    #[test]
+    fn test_multiline_parameters() {
+        let db = FixtureDatabase::new();
+
+        // Conftest with fixture
+        let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def foo():
+    return 42
+"#;
+        let conftest_path = PathBuf::from("/tmp/test/conftest.py");
+        db.analyze_file(conftest_path.clone(), conftest_content);
+
+        // Test file with multiline parameters
+        let test_content = r#"
+def test_xxx(
+    foo,
+):
+    assert foo == 42
+"#;
+        let test_path = PathBuf::from("/tmp/test/test_example.py");
+        db.analyze_file(test_path.clone(), test_content);
+
+        // Line 3 (1-indexed) is "    foo," - the parameter line
+        // In LSP coordinates, that's line 2 (0-indexed)
+        // Character position 4 is the 'f' in 'foo'
+
+        // Debug: Check what usages were recorded
+        if let Some(usages) = db.usages.get(&test_path) {
+            println!("Usages recorded:");
+            for usage in usages.iter() {
+                println!("  {} at line {} (1-indexed)", usage.name, usage.line);
+            }
+        } else {
+            println!("No usages recorded for test file");
+        }
+
+        // The content has a leading newline, so:
+        // Line 1: (empty)
+        // Line 2: def test_xxx(
+        // Line 3:     foo,
+        // Line 4: ):
+        // Line 5:     assert foo == 42
+
+        // foo is at line 3 (1-indexed) = line 2 (0-indexed LSP)
+        let result = db.find_fixture_definition(&test_path, 2, 4);
+
+        assert!(
+            result.is_some(),
+            "Should find fixture definition when cursor is on parameter line"
+        );
+        let def = result.unwrap();
+        assert_eq!(def.name, "foo");
     }
 }
