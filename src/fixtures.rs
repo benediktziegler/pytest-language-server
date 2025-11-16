@@ -662,18 +662,24 @@ impl FixtureDatabase {
         let definitions = self.definitions.get(fixture_name)?;
 
         // Priority 1: Check if fixture is defined in the same file (highest priority)
+        // If multiple definitions exist in the same file, return the last one (pytest semantics)
         debug!(
             "Checking for fixture {} in same file: {:?}",
             fixture_name, file_path
         );
-        for def in definitions.iter() {
-            if def.file_path == file_path {
-                info!(
-                    "Found fixture {} in same file (highest priority)",
-                    fixture_name
-                );
-                return Some(def.clone());
-            }
+        let same_file_defs: Vec<_> = definitions
+            .iter()
+            .filter(|def| def.file_path == file_path)
+            .collect();
+
+        if !same_file_defs.is_empty() {
+            // Return the last definition (highest line number) - pytest uses last definition
+            let last_def = same_file_defs.iter().max_by_key(|def| def.line).unwrap();
+            info!(
+                "Found fixture {} in same file at line {} (using last definition)",
+                fixture_name, last_def.line
+            );
+            return Some((*last_def).clone());
         }
 
         // Priority 2: Search upward through conftest.py files in parent directories
@@ -726,25 +732,36 @@ impl FixtureDatabase {
 
         // Priority 1: Check if fixture is defined in the same file (highest priority)
         // but skip the excluded definition
+        // If multiple definitions exist, use the last one (pytest semantics)
         debug!(
             "Checking for fixture {} in same file: {:?} (excluding: {:?})",
             fixture_name, file_path, exclude
         );
-        for def in definitions.iter() {
-            if def.file_path == file_path {
+        let same_file_defs: Vec<_> = definitions
+            .iter()
+            .filter(|def| {
+                if def.file_path != file_path {
+                    return false;
+                }
                 // Skip the excluded definition
                 if let Some(excluded) = exclude {
-                    if def == excluded {
+                    if def == &excluded {
                         debug!("Skipping excluded definition at line {}", def.line);
-                        continue;
+                        return false;
                     }
                 }
-                info!(
-                    "Found fixture {} in same file (highest priority)",
-                    fixture_name
-                );
-                return Some(def.clone());
-            }
+                true
+            })
+            .collect();
+
+        if !same_file_defs.is_empty() {
+            // Return the last definition (highest line number) - pytest uses last definition
+            let last_def = same_file_defs.iter().max_by_key(|def| def.line).unwrap();
+            info!(
+                "Found fixture {} in same file at line {} (using last definition, excluding specified)",
+                fixture_name, last_def.line
+            );
+            return Some((*last_def).clone());
         }
 
         // Priority 2: Search upward through conftest.py files in parent directories
@@ -944,6 +961,10 @@ impl FixtureDatabase {
 
     /// Find all references (usages) that would resolve to a specific fixture definition
     /// This respects the priority rules: same file > closest conftest.py > parent conftest.py
+    ///
+    /// For fixture overriding, this handles self-referencing parameters correctly:
+    /// If a fixture parameter appears on the same line as a fixture definition with the same name,
+    /// we exclude that definition when resolving, so it finds the parent instead.
     pub fn find_references_for_definition(
         &self,
         definition: &FixtureDefinition,
@@ -962,9 +983,33 @@ impl FixtureDatabase {
 
             for usage in usages.iter() {
                 if usage.name == definition.name {
-                    // Check if this usage would resolve to our specific definition
-                    if let Some(resolved_def) = self.find_closest_definition(file_path, &usage.name)
-                    {
+                    // Check if this usage is on the same line as a fixture definition with the same name
+                    // (i.e., a self-referencing fixture parameter like "def foo(foo):")
+                    let fixture_def_at_line =
+                        self.get_fixture_definition_at_line(file_path, usage.line);
+
+                    let resolved_def = if let Some(ref current_def) = fixture_def_at_line {
+                        if current_def.name == usage.name {
+                            // Self-referencing parameter - exclude current definition and find parent
+                            debug!(
+                                "Usage at {:?}:{} is self-referencing, excluding definition at line {}",
+                                file_path, usage.line, current_def.line
+                            );
+                            self.find_closest_definition_excluding(
+                                file_path,
+                                &usage.name,
+                                Some(current_def),
+                            )
+                        } else {
+                            // Different fixture - use normal resolution
+                            self.find_closest_definition(file_path, &usage.name)
+                        }
+                    } else {
+                        // Not on a fixture definition line - use normal resolution
+                        self.find_closest_definition(file_path, &usage.name)
+                    };
+
+                    if let Some(resolved_def) = resolved_def {
                         if resolved_def == *definition {
                             debug!(
                                 "Usage at {:?}:{} resolves to our definition",
@@ -1793,5 +1838,481 @@ def test_xxx(foo):
             "Should resolve usage to definition"
         );
         assert_eq!(def_from_usage.unwrap(), *foo_def);
+    }
+
+    #[test]
+    fn test_fixture_hierarchy_parent_references() {
+        // Test that finding references from a parent fixture definition
+        // includes child fixture definitions but NOT the child's usages
+        let db = FixtureDatabase::new();
+
+        // Parent conftest
+        let parent_content = r#"
+import pytest
+
+@pytest.fixture
+def cli_runner():
+    """Parent fixture"""
+    return "parent"
+"#;
+        let parent_conftest = PathBuf::from("/tmp/project/conftest.py");
+        db.analyze_file(parent_conftest.clone(), parent_content);
+
+        // Child conftest with override
+        let child_content = r#"
+import pytest
+
+@pytest.fixture
+def cli_runner(cli_runner):
+    """Child override that uses parent"""
+    return cli_runner
+"#;
+        let child_conftest = PathBuf::from("/tmp/project/subdir/conftest.py");
+        db.analyze_file(child_conftest.clone(), child_content);
+
+        // Test file in subdir using the child fixture
+        let test_content = r#"
+def test_one(cli_runner):
+    pass
+
+def test_two(cli_runner):
+    pass
+"#;
+        let test_path = PathBuf::from("/tmp/project/subdir/test_example.py");
+        db.analyze_file(test_path.clone(), test_content);
+
+        // Get parent definition
+        let parent_defs = db.definitions.get("cli_runner").unwrap();
+        let parent_def = parent_defs
+            .iter()
+            .find(|d| d.file_path == parent_conftest)
+            .unwrap();
+
+        println!(
+            "\nParent definition: {:?}:{}",
+            parent_def.file_path, parent_def.line
+        );
+
+        // Find references for parent definition
+        let refs = db.find_references_for_definition(parent_def);
+
+        println!("\nReferences for parent definition:");
+        for r in &refs {
+            println!("  {} at {:?}:{}", r.name, r.file_path, r.line);
+        }
+
+        // Parent references should include:
+        // 1. The child fixture definition (line 5 in child conftest)
+        // 2. The child's parameter that references the parent (line 5 in child conftest)
+        // But NOT:
+        // 3. test_one and test_two usages (they resolve to child, not parent)
+
+        assert!(
+            refs.len() <= 2,
+            "Parent should have at most 2 references: child definition and its parameter, got {}",
+            refs.len()
+        );
+
+        // Should include the child conftest
+        let child_refs: Vec<_> = refs
+            .iter()
+            .filter(|r| r.file_path == child_conftest)
+            .collect();
+        assert!(
+            !child_refs.is_empty(),
+            "Parent references should include child fixture definition"
+        );
+
+        // Should NOT include test file usages
+        let test_refs: Vec<_> = refs.iter().filter(|r| r.file_path == test_path).collect();
+        assert!(
+            test_refs.is_empty(),
+            "Parent references should NOT include child's test file usages"
+        );
+    }
+
+    #[test]
+    fn test_fixture_hierarchy_child_references() {
+        // Test that finding references from a child fixture definition
+        // includes usages in the same directory (that resolve to the child)
+        let db = FixtureDatabase::new();
+
+        // Parent conftest
+        let parent_content = r#"
+import pytest
+
+@pytest.fixture
+def cli_runner():
+    return "parent"
+"#;
+        let parent_conftest = PathBuf::from("/tmp/project/conftest.py");
+        db.analyze_file(parent_conftest.clone(), parent_content);
+
+        // Child conftest with override
+        let child_content = r#"
+import pytest
+
+@pytest.fixture
+def cli_runner(cli_runner):
+    return cli_runner
+"#;
+        let child_conftest = PathBuf::from("/tmp/project/subdir/conftest.py");
+        db.analyze_file(child_conftest.clone(), child_content);
+
+        // Test file using child fixture
+        let test_content = r#"
+def test_one(cli_runner):
+    pass
+
+def test_two(cli_runner):
+    pass
+"#;
+        let test_path = PathBuf::from("/tmp/project/subdir/test_example.py");
+        db.analyze_file(test_path.clone(), test_content);
+
+        // Get child definition
+        let child_defs = db.definitions.get("cli_runner").unwrap();
+        let child_def = child_defs
+            .iter()
+            .find(|d| d.file_path == child_conftest)
+            .unwrap();
+
+        println!(
+            "\nChild definition: {:?}:{}",
+            child_def.file_path, child_def.line
+        );
+
+        // Find references for child definition
+        let refs = db.find_references_for_definition(child_def);
+
+        println!("\nReferences for child definition:");
+        for r in &refs {
+            println!("  {} at {:?}:{}", r.name, r.file_path, r.line);
+        }
+
+        // Child references should include test_one and test_two
+        assert!(
+            refs.len() >= 2,
+            "Child should have at least 2 references from test file, got {}",
+            refs.len()
+        );
+
+        let test_refs: Vec<_> = refs.iter().filter(|r| r.file_path == test_path).collect();
+        assert_eq!(
+            test_refs.len(),
+            2,
+            "Should have 2 references from test file"
+        );
+    }
+
+    #[test]
+    fn test_fixture_hierarchy_child_parameter_references() {
+        // Test that finding references from a child fixture's parameter
+        // (which references the parent) includes the child fixture definition
+        let db = FixtureDatabase::new();
+
+        // Parent conftest
+        let parent_content = r#"
+import pytest
+
+@pytest.fixture
+def cli_runner():
+    return "parent"
+"#;
+        let parent_conftest = PathBuf::from("/tmp/project/conftest.py");
+        db.analyze_file(parent_conftest.clone(), parent_content);
+
+        // Child conftest with override
+        let child_content = r#"
+import pytest
+
+@pytest.fixture
+def cli_runner(cli_runner):
+    return cli_runner
+"#;
+        let child_conftest = PathBuf::from("/tmp/project/subdir/conftest.py");
+        db.analyze_file(child_conftest.clone(), child_content);
+
+        // When user clicks on the parameter "cli_runner" in the child definition,
+        // it should resolve to the parent definition
+        // Line 5 (1-indexed) = line 4 (0-indexed LSP), char 15 is in the parameter name
+        let resolved_def = db.find_fixture_definition(&child_conftest, 4, 15);
+
+        assert!(
+            resolved_def.is_some(),
+            "Child parameter should resolve to parent definition"
+        );
+
+        let def = resolved_def.unwrap();
+        assert_eq!(
+            def.file_path, parent_conftest,
+            "Should resolve to parent conftest"
+        );
+
+        // Find references for parent definition
+        let refs = db.find_references_for_definition(&def);
+
+        println!("\nReferences for parent (from child parameter):");
+        for r in &refs {
+            println!("  {} at {:?}:{}", r.name, r.file_path, r.line);
+        }
+
+        // Should include the child fixture's parameter usage
+        let child_refs: Vec<_> = refs
+            .iter()
+            .filter(|r| r.file_path == child_conftest)
+            .collect();
+        assert!(
+            !child_refs.is_empty(),
+            "Parent references should include child fixture parameter"
+        );
+    }
+
+    #[test]
+    fn test_fixture_hierarchy_usage_from_test() {
+        // Test that finding references from a test function parameter
+        // includes the definition it resolves to and other usages
+        let db = FixtureDatabase::new();
+
+        // Parent conftest
+        let parent_content = r#"
+import pytest
+
+@pytest.fixture
+def cli_runner():
+    return "parent"
+"#;
+        let parent_conftest = PathBuf::from("/tmp/project/conftest.py");
+        db.analyze_file(parent_conftest.clone(), parent_content);
+
+        // Child conftest with override
+        let child_content = r#"
+import pytest
+
+@pytest.fixture
+def cli_runner(cli_runner):
+    return cli_runner
+"#;
+        let child_conftest = PathBuf::from("/tmp/project/subdir/conftest.py");
+        db.analyze_file(child_conftest.clone(), child_content);
+
+        // Test file using child fixture
+        let test_content = r#"
+def test_one(cli_runner):
+    pass
+
+def test_two(cli_runner):
+    pass
+
+def test_three(cli_runner):
+    pass
+"#;
+        let test_path = PathBuf::from("/tmp/project/subdir/test_example.py");
+        db.analyze_file(test_path.clone(), test_content);
+
+        // Click on cli_runner in test_one (line 2, 1-indexed = line 1, 0-indexed)
+        let resolved_def = db.find_fixture_definition(&test_path, 1, 13);
+
+        assert!(
+            resolved_def.is_some(),
+            "Usage should resolve to child definition"
+        );
+
+        let def = resolved_def.unwrap();
+        assert_eq!(
+            def.file_path, child_conftest,
+            "Should resolve to child conftest (not parent)"
+        );
+
+        // Find references for the resolved definition
+        let refs = db.find_references_for_definition(&def);
+
+        println!("\nReferences for child (from test usage):");
+        for r in &refs {
+            println!("  {} at {:?}:{}", r.name, r.file_path, r.line);
+        }
+
+        // Should include all three test usages
+        let test_refs: Vec<_> = refs.iter().filter(|r| r.file_path == test_path).collect();
+        assert_eq!(test_refs.len(), 3, "Should find all 3 usages in test file");
+    }
+
+    #[test]
+    fn test_fixture_hierarchy_multiple_levels() {
+        // Test a three-level hierarchy: grandparent -> parent -> child
+        let db = FixtureDatabase::new();
+
+        // Grandparent
+        let grandparent_content = r#"
+import pytest
+
+@pytest.fixture
+def db():
+    return "grandparent_db"
+"#;
+        let grandparent_conftest = PathBuf::from("/tmp/project/conftest.py");
+        db.analyze_file(grandparent_conftest.clone(), grandparent_content);
+
+        // Parent overrides
+        let parent_content = r#"
+import pytest
+
+@pytest.fixture
+def db(db):
+    return f"parent_{db}"
+"#;
+        let parent_conftest = PathBuf::from("/tmp/project/api/conftest.py");
+        db.analyze_file(parent_conftest.clone(), parent_content);
+
+        // Child overrides again
+        let child_content = r#"
+import pytest
+
+@pytest.fixture
+def db(db):
+    return f"child_{db}"
+"#;
+        let child_conftest = PathBuf::from("/tmp/project/api/tests/conftest.py");
+        db.analyze_file(child_conftest.clone(), child_content);
+
+        // Test file at child level
+        let test_content = r#"
+def test_db(db):
+    pass
+"#;
+        let test_path = PathBuf::from("/tmp/project/api/tests/test_example.py");
+        db.analyze_file(test_path.clone(), test_content);
+
+        // Get all definitions
+        let all_defs = db.definitions.get("db").unwrap();
+        assert_eq!(all_defs.len(), 3, "Should have 3 definitions");
+
+        let grandparent_def = all_defs
+            .iter()
+            .find(|d| d.file_path == grandparent_conftest)
+            .unwrap();
+        let parent_def = all_defs
+            .iter()
+            .find(|d| d.file_path == parent_conftest)
+            .unwrap();
+        let child_def = all_defs
+            .iter()
+            .find(|d| d.file_path == child_conftest)
+            .unwrap();
+
+        // Test from test file - should resolve to child
+        let resolved = db.find_fixture_definition(&test_path, 1, 12);
+        assert_eq!(
+            resolved.as_ref(),
+            Some(child_def),
+            "Test should use child definition"
+        );
+
+        // Child's references should include test file
+        let child_refs = db.find_references_for_definition(child_def);
+        let test_refs: Vec<_> = child_refs
+            .iter()
+            .filter(|r| r.file_path == test_path)
+            .collect();
+        assert!(
+            !test_refs.is_empty(),
+            "Child should have test file references"
+        );
+
+        // Parent's references should include child's parameter, but not test file
+        let parent_refs = db.find_references_for_definition(parent_def);
+        let child_param_refs: Vec<_> = parent_refs
+            .iter()
+            .filter(|r| r.file_path == child_conftest)
+            .collect();
+        let test_refs_in_parent: Vec<_> = parent_refs
+            .iter()
+            .filter(|r| r.file_path == test_path)
+            .collect();
+
+        assert!(
+            !child_param_refs.is_empty(),
+            "Parent should have child parameter reference"
+        );
+        assert!(
+            test_refs_in_parent.is_empty(),
+            "Parent should NOT have test file references"
+        );
+
+        // Grandparent's references should include parent's parameter, but not child's stuff
+        let grandparent_refs = db.find_references_for_definition(grandparent_def);
+        let parent_param_refs: Vec<_> = grandparent_refs
+            .iter()
+            .filter(|r| r.file_path == parent_conftest)
+            .collect();
+        let child_refs_in_gp: Vec<_> = grandparent_refs
+            .iter()
+            .filter(|r| r.file_path == child_conftest)
+            .collect();
+
+        assert!(
+            !parent_param_refs.is_empty(),
+            "Grandparent should have parent parameter reference"
+        );
+        assert!(
+            child_refs_in_gp.is_empty(),
+            "Grandparent should NOT have child references"
+        );
+    }
+
+    #[test]
+    fn test_fixture_hierarchy_same_file_override() {
+        // Test that a fixture can be overridden in the same file
+        // (less common but valid pytest pattern)
+        let db = FixtureDatabase::new();
+
+        let content = r#"
+import pytest
+
+@pytest.fixture
+def base():
+    return "base"
+
+@pytest.fixture
+def base(base):
+    return f"override_{base}"
+
+def test_uses_override(base):
+    pass
+"#;
+        let test_path = PathBuf::from("/tmp/test/test_example.py");
+        db.analyze_file(test_path.clone(), content);
+
+        let defs = db.definitions.get("base").unwrap();
+        assert_eq!(defs.len(), 2, "Should have 2 definitions in same file");
+
+        println!("\nDefinitions found:");
+        for d in defs.iter() {
+            println!("  base at line {}", d.line);
+        }
+
+        // Check usages
+        if let Some(usages) = db.usages.get(&test_path) {
+            println!("\nUsages found:");
+            for u in usages.iter() {
+                println!("  {} at line {}", u.name, u.line);
+            }
+        } else {
+            println!("\nNo usages found!");
+        }
+
+        // The test should resolve to the second definition (override)
+        // Line 12 (1-indexed) = line 11 (0-indexed LSP)
+        // Character position: "def test_uses_override(base):" - 'b' is at position 23
+        let resolved = db.find_fixture_definition(&test_path, 11, 23);
+
+        println!("\nResolved: {:?}", resolved.as_ref().map(|d| d.line));
+
+        assert!(resolved.is_some(), "Should resolve to override definition");
+
+        // The second definition should be at line 9 (1-indexed)
+        let override_def = defs.iter().find(|d| d.line == 9).unwrap();
+        println!("Override def at line: {}", override_def.line);
+        assert_eq!(resolved.as_ref(), Some(override_def));
     }
 }
