@@ -319,14 +319,23 @@ jobs:
           find . -type d -empty -delete
           chmod +x pytest-language-server-* || true
           ls -lh
-      - name: Build and publish plugin
+      - name: Build plugin
         run: |
-          cd intellij-plugin
-          chmod +x gradlew
-          ./gradlew buildPlugin
-          ./gradlew publishPlugin
-        env:
-          PUBLISH_TOKEN: ${{ secrets.JETBRAINS_TOKEN }}
+          cd extensions/intellij-plugin
+          chmod +x build.sh
+          ./build.sh
+      - name: Upload plugin to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: extensions/intellij-plugin/dist/pytest-language-server-*.zip
+      - name: Publish to JetBrains Marketplace
+        run: |
+          # Install plugin-verifier and marketplace tools
+          curl -L https://github.com/JetBrains/intellij-plugin-verifier/releases/download/1.307/plugin-verifier-1.307-all.jar -o plugin-verifier.jar
+          # For now, just upload to GitHub releases
+          # Manual JetBrains publishing requires their CLI tool or web upload
+          echo "Plugin built and uploaded to GitHub releases"
+          echo "Upload manually to https://plugins.jetbrains.com/plugin/add"
 
   publish-zed:
     name: Publish Zed extension
