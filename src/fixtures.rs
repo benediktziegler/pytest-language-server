@@ -1935,6 +1935,174 @@ impl FixtureDatabase {
             .map(|entry| entry.value().clone())
             .unwrap_or_default()
     }
+
+    /// Get all available fixtures for a given file, respecting pytest's fixture hierarchy
+    /// Returns a list of fixture definitions sorted by name
+    pub fn get_available_fixtures(&self, file_path: &Path) -> Vec<FixtureDefinition> {
+        let mut available_fixtures = Vec::new();
+        let mut seen_names = std::collections::HashSet::new();
+
+        // Priority 1: Fixtures in the same file
+        for entry in self.definitions.iter() {
+            let fixture_name = entry.key();
+            for def in entry.value().iter() {
+                if def.file_path == file_path && !seen_names.contains(fixture_name.as_str()) {
+                    available_fixtures.push(def.clone());
+                    seen_names.insert(fixture_name.clone());
+                }
+            }
+        }
+
+        // Priority 2: Fixtures in conftest.py files (walking up the directory tree)
+        if let Some(mut current_dir) = file_path.parent() {
+            loop {
+                let conftest_path = current_dir.join("conftest.py");
+
+                for entry in self.definitions.iter() {
+                    let fixture_name = entry.key();
+                    for def in entry.value().iter() {
+                        if def.file_path == conftest_path
+                            && !seen_names.contains(fixture_name.as_str())
+                        {
+                            available_fixtures.push(def.clone());
+                            seen_names.insert(fixture_name.clone());
+                        }
+                    }
+                }
+
+                // Move up one directory
+                match current_dir.parent() {
+                    Some(parent) => current_dir = parent,
+                    None => break,
+                }
+            }
+        }
+
+        // Priority 3: Third-party fixtures from site-packages
+        for entry in self.definitions.iter() {
+            let fixture_name = entry.key();
+            for def in entry.value().iter() {
+                if def.file_path.to_string_lossy().contains("site-packages")
+                    && !seen_names.contains(fixture_name.as_str())
+                {
+                    available_fixtures.push(def.clone());
+                    seen_names.insert(fixture_name.clone());
+                }
+            }
+        }
+
+        // Sort by name for consistent ordering
+        available_fixtures.sort_by(|a, b| a.name.cmp(&b.name));
+        available_fixtures
+    }
+
+    /// Check if a position is inside a test or fixture function (parameter or body)
+    /// Returns Some((function_name, is_fixture, declared_params)) if inside a function
+    pub fn is_inside_function(
+        &self,
+        file_path: &Path,
+        line: u32,
+        character: u32,
+    ) -> Option<(String, bool, Vec<String>)> {
+        // Try cache first, then file system
+        let content: Arc<String> = if let Some(cached) = self.file_cache.get(file_path) {
+            Arc::clone(cached.value())
+        } else {
+            Arc::new(std::fs::read_to_string(file_path).ok()?)
+        };
+
+        let target_line = (line + 1) as usize; // Convert to 1-based
+
+        // Parse the file
+        let parsed = parse(&content, Mode::Module, "").ok()?;
+
+        if let rustpython_parser::ast::Mod::Module(module) = parsed {
+            return self.find_enclosing_function(
+                &module.body,
+                &content,
+                target_line,
+                character as usize,
+            );
+        }
+
+        None
+    }
+
+    fn find_enclosing_function(
+        &self,
+        stmts: &[Stmt],
+        content: &str,
+        target_line: usize,
+        _target_char: usize,
+    ) -> Option<(String, bool, Vec<String>)> {
+        for stmt in stmts {
+            match stmt {
+                Stmt::FunctionDef(func_def) => {
+                    let func_start_line = content[..func_def.range.start().to_usize()]
+                        .matches('\n')
+                        .count()
+                        + 1;
+                    let func_end_line = content[..func_def.range.end().to_usize()]
+                        .matches('\n')
+                        .count()
+                        + 1;
+
+                    // Check if target is within this function's range
+                    if target_line >= func_start_line && target_line <= func_end_line {
+                        let is_fixture = func_def
+                            .decorator_list
+                            .iter()
+                            .any(Self::is_fixture_decorator);
+                        let is_test = func_def.name.starts_with("test_");
+
+                        // Only return if it's a test or fixture
+                        if is_test || is_fixture {
+                            let params: Vec<String> = func_def
+                                .args
+                                .args
+                                .iter()
+                                .map(|arg| arg.def.arg.to_string())
+                                .collect();
+
+                            return Some((func_def.name.to_string(), is_fixture, params));
+                        }
+                    }
+                }
+                Stmt::AsyncFunctionDef(func_def) => {
+                    let func_start_line = content[..func_def.range.start().to_usize()]
+                        .matches('\n')
+                        .count()
+                        + 1;
+                    let func_end_line = content[..func_def.range.end().to_usize()]
+                        .matches('\n')
+                        .count()
+                        + 1;
+
+                    if target_line >= func_start_line && target_line <= func_end_line {
+                        let is_fixture = func_def
+                            .decorator_list
+                            .iter()
+                            .any(Self::is_fixture_decorator);
+                        let is_test = func_def.name.starts_with("test_");
+
+                        if is_test || is_fixture {
+                            let params: Vec<String> = func_def
+                                .args
+                                .args
+                                .iter()
+                                .map(|arg| arg.def.arg.to_string())
+                                .collect();
+
+                            return Some((func_def.name.to_string(), is_fixture, params));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        None
+    }
 }
 
 #[cfg(test)]
@@ -4496,4 +4664,298 @@ def test_mid(fixture_a, fixture_c):
         mid_conftest,
         "fixture_a from mid-level test should resolve to mid conftest"
     );
+}
+
+#[test]
+fn test_get_available_fixtures_same_file() {
+    let db = FixtureDatabase::new();
+
+    let test_content = r#"
+import pytest
+
+@pytest.fixture
+def fixture_a():
+    return "a"
+
+@pytest.fixture
+def fixture_b():
+    return "b"
+
+def test_something():
+    pass
+"#;
+    let test_path = PathBuf::from("/tmp/test/test_example.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    let available = db.get_available_fixtures(&test_path);
+
+    assert_eq!(available.len(), 2, "Should find 2 fixtures in same file");
+
+    let names: Vec<_> = available.iter().map(|f| f.name.as_str()).collect();
+    assert!(names.contains(&"fixture_a"));
+    assert!(names.contains(&"fixture_b"));
+}
+
+#[test]
+fn test_get_available_fixtures_conftest_hierarchy() {
+    let db = FixtureDatabase::new();
+
+    // Root conftest
+    let root_conftest = r#"
+import pytest
+
+@pytest.fixture
+def root_fixture():
+    return "root"
+"#;
+    let root_path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(root_path.clone(), root_conftest);
+
+    // Subdir conftest
+    let sub_conftest = r#"
+import pytest
+
+@pytest.fixture
+def sub_fixture():
+    return "sub"
+"#;
+    let sub_path = PathBuf::from("/tmp/test/subdir/conftest.py");
+    db.analyze_file(sub_path.clone(), sub_conftest);
+
+    // Test file in subdir
+    let test_content = r#"
+def test_something():
+    pass
+"#;
+    let test_path = PathBuf::from("/tmp/test/subdir/test_example.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    let available = db.get_available_fixtures(&test_path);
+
+    assert_eq!(
+        available.len(),
+        2,
+        "Should find fixtures from both conftest files"
+    );
+
+    let names: Vec<_> = available.iter().map(|f| f.name.as_str()).collect();
+    assert!(names.contains(&"root_fixture"));
+    assert!(names.contains(&"sub_fixture"));
+}
+
+#[test]
+fn test_get_available_fixtures_no_duplicates() {
+    let db = FixtureDatabase::new();
+
+    // Root conftest
+    let root_conftest = r#"
+import pytest
+
+@pytest.fixture
+def shared_fixture():
+    return "root"
+"#;
+    let root_path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(root_path.clone(), root_conftest);
+
+    // Subdir conftest with same fixture name
+    let sub_conftest = r#"
+import pytest
+
+@pytest.fixture
+def shared_fixture():
+    return "sub"
+"#;
+    let sub_path = PathBuf::from("/tmp/test/subdir/conftest.py");
+    db.analyze_file(sub_path.clone(), sub_conftest);
+
+    // Test file in subdir
+    let test_content = r#"
+def test_something():
+    pass
+"#;
+    let test_path = PathBuf::from("/tmp/test/subdir/test_example.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    let available = db.get_available_fixtures(&test_path);
+
+    // Should only find one "shared_fixture" (the closest one)
+    let shared_count = available
+        .iter()
+        .filter(|f| f.name == "shared_fixture")
+        .count();
+    assert_eq!(shared_count, 1, "Should only include shared_fixture once");
+
+    // The one included should be from the subdir (closest)
+    let shared_fixture = available
+        .iter()
+        .find(|f| f.name == "shared_fixture")
+        .unwrap();
+    assert_eq!(shared_fixture.file_path, sub_path);
+}
+
+#[test]
+fn test_is_inside_function_in_test() {
+    let db = FixtureDatabase::new();
+
+    let test_content = r#"
+import pytest
+
+def test_example(fixture_a, fixture_b):
+    result = fixture_a + fixture_b
+    assert result == "ab"
+"#;
+    let test_path = PathBuf::from("/tmp/test/test_example.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Test on the function definition line (line 4, 0-indexed line 3)
+    let result = db.is_inside_function(&test_path, 3, 10);
+    assert!(result.is_some());
+
+    let (func_name, is_fixture, params) = result.unwrap();
+    assert_eq!(func_name, "test_example");
+    assert!(!is_fixture);
+    assert_eq!(params, vec!["fixture_a", "fixture_b"]);
+
+    // Test inside the function body (line 5, 0-indexed line 4)
+    let result = db.is_inside_function(&test_path, 4, 10);
+    assert!(result.is_some());
+
+    let (func_name, is_fixture, _) = result.unwrap();
+    assert_eq!(func_name, "test_example");
+    assert!(!is_fixture);
+}
+
+#[test]
+fn test_is_inside_function_in_fixture() {
+    let db = FixtureDatabase::new();
+
+    let test_content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture(other_fixture):
+    return other_fixture + "_modified"
+"#;
+    let test_path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Test on the function definition line (line 5, 0-indexed line 4)
+    let result = db.is_inside_function(&test_path, 4, 10);
+    assert!(result.is_some());
+
+    let (func_name, is_fixture, params) = result.unwrap();
+    assert_eq!(func_name, "my_fixture");
+    assert!(is_fixture);
+    assert_eq!(params, vec!["other_fixture"]);
+
+    // Test inside the function body (line 6, 0-indexed line 5)
+    let result = db.is_inside_function(&test_path, 5, 10);
+    assert!(result.is_some());
+
+    let (func_name, is_fixture, _) = result.unwrap();
+    assert_eq!(func_name, "my_fixture");
+    assert!(is_fixture);
+}
+
+#[test]
+fn test_is_inside_function_outside() {
+    let db = FixtureDatabase::new();
+
+    let test_content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return "value"
+
+def test_example(my_fixture):
+    assert my_fixture == "value"
+
+# This is a comment outside any function
+"#;
+    let test_path = PathBuf::from("/tmp/test/test_example.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Test on the import line (line 1, 0-indexed line 0)
+    let result = db.is_inside_function(&test_path, 0, 0);
+    assert!(
+        result.is_none(),
+        "Should not be inside a function on import line"
+    );
+
+    // Test on the comment line (line 10, 0-indexed line 9)
+    let result = db.is_inside_function(&test_path, 9, 0);
+    assert!(
+        result.is_none(),
+        "Should not be inside a function on comment line"
+    );
+}
+
+#[test]
+fn test_is_inside_function_non_test() {
+    let db = FixtureDatabase::new();
+
+    let test_content = r#"
+import pytest
+
+def helper_function():
+    return "helper"
+
+def test_example():
+    result = helper_function()
+    assert result == "helper"
+"#;
+    let test_path = PathBuf::from("/tmp/test/test_example.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Test inside helper_function (not a test or fixture)
+    let result = db.is_inside_function(&test_path, 3, 10);
+    assert!(
+        result.is_none(),
+        "Should not return non-test, non-fixture functions"
+    );
+
+    // Test inside test_example (is a test)
+    let result = db.is_inside_function(&test_path, 6, 10);
+    assert!(result.is_some(), "Should return test functions");
+
+    let (func_name, is_fixture, _) = result.unwrap();
+    assert_eq!(func_name, "test_example");
+    assert!(!is_fixture);
+}
+
+#[test]
+fn test_is_inside_async_function() {
+    let db = FixtureDatabase::new();
+
+    let test_content = r#"
+import pytest
+
+@pytest.fixture
+async def async_fixture():
+    return "async_value"
+
+async def test_async_example(async_fixture):
+    assert async_fixture == "async_value"
+"#;
+    let test_path = PathBuf::from("/tmp/test/test_async.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Test inside async fixture (line 5, 0-indexed line 4)
+    let result = db.is_inside_function(&test_path, 4, 10);
+    assert!(result.is_some());
+
+    let (func_name, is_fixture, _) = result.unwrap();
+    assert_eq!(func_name, "async_fixture");
+    assert!(is_fixture);
+
+    // Test inside async test (line 8, 0-indexed line 7)
+    let result = db.is_inside_function(&test_path, 7, 10);
+    assert!(result.is_some());
+
+    let (func_name, is_fixture, params) = result.unwrap();
+    assert_eq!(func_name, "test_async_example");
+    assert!(!is_fixture);
+    assert_eq!(params, vec!["async_fixture"]);
 }

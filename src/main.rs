@@ -58,6 +58,15 @@ impl LanguageServer for Backend {
                         resolve_provider: None,
                     },
                 )),
+                completion_provider: Some(CompletionOptions {
+                    resolve_provider: Some(false),
+                    trigger_characters: Some(vec![]),
+                    all_commit_characters: None,
+                    work_done_progress_options: WorkDoneProgressOptions {
+                        work_done_progress: None,
+                    },
+                    completion_item: None,
+                }),
                 ..Default::default()
             },
         })
@@ -433,6 +442,70 @@ impl LanguageServer for Backend {
                 return Ok(Some(locations));
             } else {
                 info!("No fixture found at this position");
+            }
+        } else {
+            warn!("Failed to convert URI to file path: {:?}", uri);
+        }
+
+        Ok(None)
+    }
+
+    async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
+        let uri = params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+
+        info!(
+            "completion request: uri={:?}, line={}, char={}",
+            uri, position.line, position.character
+        );
+
+        if let Ok(file_path) = uri.to_file_path() {
+            // Check if we're inside a test or fixture function
+            if let Some((function_name, is_fixture, declared_params)) = self
+                .fixture_db
+                .is_inside_function(&file_path, position.line, position.character)
+            {
+                info!(
+                    "Inside function '{}' (is_fixture={}, params={:?})",
+                    function_name, is_fixture, declared_params
+                );
+
+                // Get all available fixtures for this file
+                let available_fixtures = self.fixture_db.get_available_fixtures(&file_path);
+                info!("Found {} available fixtures", available_fixtures.len());
+
+                // Convert to completion items
+                let completion_items: Vec<CompletionItem> = available_fixtures
+                    .into_iter()
+                    .map(|fixture| {
+                        let mut detail = "pytest fixture".to_string();
+                        if let Some(file_name) = fixture.file_path.file_name() {
+                            detail.push_str(&format!(" from {}", file_name.to_string_lossy()));
+                        }
+
+                        let documentation = fixture.docstring.as_ref().map(|doc| {
+                            Documentation::MarkupContent(MarkupContent {
+                                kind: MarkupKind::Markdown,
+                                value: doc.clone(),
+                            })
+                        });
+
+                        CompletionItem {
+                            label: fixture.name.clone(),
+                            kind: Some(CompletionItemKind::FUNCTION),
+                            detail: Some(detail),
+                            documentation,
+                            insert_text: Some(fixture.name.clone()),
+                            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+                            ..Default::default()
+                        }
+                    })
+                    .collect();
+
+                info!("Returning {} completion items", completion_items.len());
+                return Ok(Some(CompletionResponse::Array(completion_items)));
+            } else {
+                info!("Not inside a test or fixture function");
             }
         } else {
             warn!("Failed to convert URI to file path: {:?}", uri);
