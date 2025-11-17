@@ -21,7 +21,7 @@ A blazingly fast Language Server Protocol (LSP) implementation for pytest, built
 
 ![pytest-language-server demo](demo.gif)
 
-*Showcasing go-to-definition, find-references, hover documentation, and code actions. Demo also vibed into existence.* ✨
+*Showcasing go-to-definition, code completion, hover documentation, and code actions. Demo also vibed into existence.* ✨
 
 ## Features
 

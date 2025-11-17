@@ -54,7 +54,39 @@ Ctrl+O
 Type "ZQ"
 Sleep 300ms
 
-Type 'echo "🔧 2. Code Actions (Quick Fixes)"' Enter
+Type 'echo "✨ 2. Code Completion"' Enter
+Sleep 1.5s
+
+Type "nvim test_example.py" Enter
+Sleep 2.5s
+
+Hide
+Type ":set nu" Enter
+Show
+
+# Navigate to end of test function to add a new parameter
+Type "gg/def test_something" Enter
+Sleep 500ms
+Type "f(a"
+Sleep 500ms
+
+# Trigger completion
+Ctrl+X
+Ctrl+O
+Sleep 2.5s
+
+# Select a fixture from the list
+Type "j"
+Sleep 500ms
+Type "j"
+Sleep 500ms
+Enter
+Sleep 1.5s
+
+Type "ZQ"
+Sleep 300ms
+
+Type 'echo "🔧 3. Code Actions (Quick Fixes)"' Enter
 Sleep 1.5s
 
 Type "nvim test_undeclared_example.py" Enter
@@ -77,6 +109,7 @@ Type ":9" Enter
 Sleep 2s
 
 Type "ZQ"
+Sleep 300ms
 
 Type 'echo "✨ github.com/bellini666/pytest-language-server ✨"' Enter
 Sleep 2s
