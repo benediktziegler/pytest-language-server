@@ -18,6 +18,13 @@ echo "Copying resources..."
 cp src/main/resources/META-INF/plugin.xml build/META-INF/
 cp src/main/resources/META-INF/pluginIcon.png build/META-INF/
 
+# Copy bundled binaries if they exist
+if [ -d "src/main/resources/bin" ]; then
+  echo "Copying bundled binaries..."
+  mkdir -p build/bin
+  cp -r src/main/resources/bin/* build/bin/
+fi
+
 # Compile Kotlin files (simple compilation without dependencies for now)
 # Note: For a real LSP plugin, you'd need proper IntelliJ SDK compilation
 # For CI, we'll just package the source files which JetBrains can compile
@@ -27,7 +34,11 @@ cp -r src/main/java/com/github/bellini666/pytestlsp/*.kt build/classes/com/githu
 # Create JAR
 echo "Creating plugin JAR..."
 cd build
-jar cf ../pytest-language-server.jar META-INF/ classes/
+if [ -d "bin" ]; then
+  jar cf ../pytest-language-server.jar META-INF/ classes/ bin/
+else
+  jar cf ../pytest-language-server.jar META-INF/ classes/
+fi
 
 # Create distribution ZIP
 cd ..

@@ -12,3 +12,6 @@ node_modules/**
 out/**
 .eslintrc.json
 tsconfig.json
+
+# Include bundled binaries
+!bin/**
