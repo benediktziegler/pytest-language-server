@@ -64,10 +64,12 @@ Hide
 Type ":set nu" Enter
 Show
 
-# Navigate to end of test function to add a new parameter
-Type "gg/def test_something" Enter
-Sleep 500ms
-Type "f(a"
+# Navigate to first test function and go to end of parameters
+Type "gg"
+Sleep 300ms
+Type "f)"
+Sleep 300ms
+Type "i, "
 Sleep 500ms
 
 # Trigger completion
@@ -75,15 +77,18 @@ Ctrl+X
 Ctrl+O
 Sleep 2.5s
 
-# Select a fixture from the list
-Type "j"
+# Navigate down in completion menu
+Down
 Sleep 500ms
-Type "j"
+Down
 Sleep 500ms
 Enter
 Sleep 1.5s
 
-Type "ZQ"
+# Exit without saving
+Escape
+Sleep 300ms
+Type ":q!" Enter
 Sleep 300ms
 
 Type 'echo "🔧 3. Code Actions (Quick Fixes)"' Enter
