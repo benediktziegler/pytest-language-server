@@ -40,9 +40,9 @@ if [ -f "extensions/vscode-extension/package.json" ]; then
 fi
 
 # Update IntelliJ plugin
-if [ -f "extensions/intellij-plugin/build.gradle.kts" ]; then
-    sed -i.bak "s/^version = '.*'/version = '$NEW_VERSION'/" extensions/intellij-plugin/build.gradle.kts && rm extensions/intellij-plugin/build.gradle.kts.bak
-    echo "  - extensions/intellij-plugin/build.gradle.kts"
+if [ -f "extensions/intellij-plugin/src/main/resources/META-INF/plugin.xml" ]; then
+    sed -i.bak "s/<version>.*<\/version>/<version>$NEW_VERSION<\/version>/" extensions/intellij-plugin/src/main/resources/META-INF/plugin.xml && rm extensions/intellij-plugin/src/main/resources/META-INF/plugin.xml.bak
+    echo "  - extensions/intellij-plugin/src/main/resources/META-INF/plugin.xml"
 fi
 
 # Update Cargo.lock
