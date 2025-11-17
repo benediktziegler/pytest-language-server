@@ -2,7 +2,10 @@
 # Simple build script for IntelliJ plugin without Gradle
 set -e
 
-echo "Building pytest-language-server IntelliJ plugin..."
+# Extract version from plugin.xml
+VERSION=$(grep -o '<version>[^<]*</version>' src/main/resources/META-INF/plugin.xml | sed 's/<version>\(.*\)<\/version>/\1/')
+
+echo "Building pytest-language-server IntelliJ plugin v${VERSION}..."
 
 # Clean previous builds
 rm -rf build
@@ -33,7 +36,7 @@ cp pytest-language-server.jar dist/
 cd dist
 mkdir -p pytest-language-server/lib
 mv pytest-language-server.jar pytest-language-server/lib/
-zip -r pytest-language-server-0.5.1.zip pytest-language-server/
+zip -r pytest-language-server-${VERSION}.zip pytest-language-server/
 
-echo "✓ Plugin built successfully: dist/pytest-language-server-0.5.1.zip"
-ls -lh pytest-language-server-0.5.1.zip
+echo "✓ Plugin built successfully: dist/pytest-language-server-${VERSION}.zip"
+ls -lh pytest-language-server-${VERSION}.zip
