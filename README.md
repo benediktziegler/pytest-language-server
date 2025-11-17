@@ -32,6 +32,15 @@ Jump directly to fixture definitions from anywhere they're used:
 - Third-party fixtures from pytest plugins (pytest-mock, pytest-asyncio, etc.)
 - Respects pytest's fixture shadowing/priority rules
 
+### ✨ Code Completion
+Smart auto-completion for pytest fixtures:
+- **Context-aware**: Only triggers inside test functions and fixture functions
+- **Hierarchy-respecting**: Suggests fixtures based on pytest's priority rules (same file > conftest.py > third-party)
+- **Rich information**: Shows fixture source file and docstring
+- **No duplicates**: Automatically filters out shadowed fixtures
+- **Works everywhere**: Completions available in both function parameters and function bodies
+- Supports both sync and async functions
+
 ### 🔍 Find References
 Find all usages of a fixture across your entire test suite:
 - Works from fixture definitions or usage sites
