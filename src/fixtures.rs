@@ -40,8 +40,8 @@ pub struct FixtureDatabase {
     definitions: Arc<DashMap<String, Vec<FixtureDefinition>>>,
     // Map from file path to fixtures used in that file
     usages: Arc<DashMap<PathBuf, Vec<FixtureUsage>>>,
-    // Cache of file contents for analyzed files (mainly for testing)
-    file_cache: Arc<DashMap<PathBuf, String>>,
+    // Cache of file contents for analyzed files (uses Arc for efficient sharing)
+    file_cache: Arc<DashMap<PathBuf, Arc<String>>>,
     // Map from file path to undeclared fixtures used in function bodies
     undeclared_fixtures: Arc<DashMap<PathBuf, Vec<UndeclaredFixture>>>,
     // Map from file path to imported names in that file
@@ -277,8 +277,9 @@ impl FixtureDatabase {
         debug!("Analyzing file: {:?}", file_path);
 
         // Cache the file content for later use (e.g., in find_fixture_definition)
+        // Use Arc for efficient sharing without cloning
         self.file_cache
-            .insert(file_path.clone(), content.to_string());
+            .insert(file_path.clone(), Arc::new(content.to_string()));
 
         // Parse the Python code
         let parsed = match parse(content, Mode::Module, "") {
@@ -1402,18 +1403,15 @@ impl FixtureDatabase {
         let target_line = (line + 1) as usize; // Convert from 0-based to 1-based
 
         // Read the file content - try cache first, then file system
-        let content = if let Some(cached) = self.file_cache.get(file_path) {
-            cached.clone()
+        // Use Arc to avoid cloning large strings - just increments ref count
+        let content: Arc<String> = if let Some(cached) = self.file_cache.get(file_path) {
+            Arc::clone(cached.value())
         } else {
-            std::fs::read_to_string(file_path).ok()?
+            Arc::new(std::fs::read_to_string(file_path).ok()?)
         };
-        let lines: Vec<&str> = content.lines().collect();
 
-        if target_line == 0 || target_line > lines.len() {
-            return None;
-        }
-
-        let line_content = lines[target_line - 1];
+        // Avoid allocating Vec - access line directly via iterator
+        let line_content = content.lines().nth(target_line.saturating_sub(1))?;
         debug!("Line content: {}", line_content);
 
         // Extract the word at the character position
@@ -1510,19 +1508,18 @@ impl FixtureDatabase {
             "Checking for fixture {} in same file: {:?}",
             fixture_name, file_path
         );
-        let same_file_defs: Vec<_> = definitions
+
+        // Use iterator directly without collecting to Vec - more efficient
+        if let Some(last_def) = definitions
             .iter()
             .filter(|def| def.file_path == file_path)
-            .collect();
-
-        if !same_file_defs.is_empty() {
-            // Return the last definition (highest line number) - pytest uses last definition
-            let last_def = same_file_defs.iter().max_by_key(|def| def.line).unwrap();
+            .max_by_key(|def| def.line)
+        {
             info!(
                 "Found fixture {} in same file at line {} (using last definition)",
                 fixture_name, last_def.line
             );
-            return Some((*last_def).clone());
+            return Some(last_def.clone());
         }
 
         // Priority 2: Search upward through conftest.py files in parent directories
@@ -1605,7 +1602,9 @@ impl FixtureDatabase {
             "Checking for fixture {} in same file: {:?} (excluding: {:?})",
             fixture_name, file_path, exclude
         );
-        let same_file_defs: Vec<_> = definitions
+
+        // Use iterator directly without collecting to Vec - more efficient
+        if let Some(last_def) = definitions
             .iter()
             .filter(|def| {
                 if def.file_path != file_path {
@@ -1620,16 +1619,13 @@ impl FixtureDatabase {
                 }
                 true
             })
-            .collect();
-
-        if !same_file_defs.is_empty() {
-            // Return the last definition (highest line number) - pytest uses last definition
-            let last_def = same_file_defs.iter().max_by_key(|def| def.line).unwrap();
+            .max_by_key(|def| def.line)
+        {
             info!(
                 "Found fixture {} in same file at line {} (using last definition, excluding specified)",
                 fixture_name, last_def.line
             );
-            return Some((*last_def).clone());
+            return Some(last_def.clone());
         }
 
         // Priority 2: Search upward through conftest.py files in parent directories
@@ -1727,18 +1723,15 @@ impl FixtureDatabase {
         );
 
         // Read the file content - try cache first, then file system
-        let content = if let Some(cached) = self.file_cache.get(file_path) {
-            cached.clone()
+        // Use Arc to avoid cloning large strings - just increments ref count
+        let content: Arc<String> = if let Some(cached) = self.file_cache.get(file_path) {
+            Arc::clone(cached.value())
         } else {
-            std::fs::read_to_string(file_path).ok()?
+            Arc::new(std::fs::read_to_string(file_path).ok()?)
         };
-        let lines: Vec<&str> = content.lines().collect();
 
-        if target_line == 0 || target_line > lines.len() {
-            return None;
-        }
-
-        let line_content = lines[target_line - 1];
+        // Avoid allocating Vec - access line directly via iterator
+        let line_content = content.lines().nth(target_line.saturating_sub(1))?;
         debug!("Line content: {}", line_content);
 
         // Extract the word at the character position
