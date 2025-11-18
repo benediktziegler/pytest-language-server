@@ -66,6 +66,18 @@ impl FixtureDatabase {
         }
     }
 
+    /// Get file content from cache or read from filesystem
+    /// Returns None if file cannot be read
+    fn get_file_content(&self, file_path: &Path) -> Option<Arc<String>> {
+        if let Some(cached) = self.file_cache.get(file_path) {
+            Some(Arc::clone(cached.value()))
+        } else {
+            std::fs::read_to_string(file_path)
+                .ok()
+                .map(Arc::new)
+        }
+    }
+
     /// Scan a workspace directory for test files and conftest.py files
     pub fn scan_workspace(&self, root_path: &Path) {
         info!("Scanning workspace: {:?}", root_path);
@@ -1554,11 +1566,7 @@ impl FixtureDatabase {
 
         // Read the file content - try cache first, then file system
         // Use Arc to avoid cloning large strings - just increments ref count
-        let content: Arc<String> = if let Some(cached) = self.file_cache.get(file_path) {
-            Arc::clone(cached.value())
-        } else {
-            Arc::new(std::fs::read_to_string(file_path).ok()?)
-        };
+        let content = self.get_file_content(file_path)?;
 
         // Avoid allocating Vec - access line directly via iterator
         let line_content = content.lines().nth(target_line.saturating_sub(1))?;
@@ -1874,11 +1882,7 @@ impl FixtureDatabase {
 
         // Read the file content - try cache first, then file system
         // Use Arc to avoid cloning large strings - just increments ref count
-        let content: Arc<String> = if let Some(cached) = self.file_cache.get(file_path) {
-            Arc::clone(cached.value())
-        } else {
-            Arc::new(std::fs::read_to_string(file_path).ok()?)
-        };
+        let content = self.get_file_content(file_path)?;
 
         // Avoid allocating Vec - access line directly via iterator
         let line_content = content.lines().nth(target_line.saturating_sub(1))?;
@@ -2155,11 +2159,7 @@ impl FixtureDatabase {
         character: u32,
     ) -> Option<(String, bool, Vec<String>)> {
         // Try cache first, then file system
-        let content: Arc<String> = if let Some(cached) = self.file_cache.get(file_path) {
-            Arc::clone(cached.value())
-        } else {
-            Arc::new(std::fs::read_to_string(file_path).ok()?)
-        };
+        let content = self.get_file_content(file_path)?;
 
         let target_line = (line + 1) as usize; // Convert to 1-based
 
