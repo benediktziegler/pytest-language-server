@@ -117,7 +117,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - runner: macos-13
+          - runner: macos-15
             target: x86_64
           - runner: macos-14
             target: aarch64
@@ -223,7 +223,7 @@ jobs:
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             binary_name: pytest-language-server-aarch64-unknown-linux-gnu
-          - os: macos-13
+          - os: macos-15
             target: x86_64-apple-darwin
             binary_name: pytest-language-server-x86_64-apple-darwin
           - os: macos-14
@@ -394,26 +394,8 @@ jobs:
   publish-zed:
     name: Publish Zed extension
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    # Disabled: Extension must be published manually to zed-industries/extensions
+    # Automated publishing is disabled until further notice
+    if: false
     steps:
       - uses: actions/checkout@v4
-      - name: Debug - Check version and extension info
-        run: |
-          echo "Current version in extension.toml:"
-          grep "^version" extensions/zed-extension/extension.toml
-          echo "Git tag: ${{ github.ref_name }}"
-      - name: Sync fork with upstream
-        run: |
-          echo "Note: Ensure bellini666/extensions fork is synced with zed-industries/extensions"
-          echo "The action requires the pytest-language-server entry to exist in your fork"
-      - uses: huacnlee/zed-extension-action@v1
-        with:
-          extension-name: pytest-language-server
-          extension-path: extensions/zed-extension
-          push-to: bellini666/extensions
-          commit-message: |
-            Update pytest-language-server to ${{ github.ref_name }}
-
-            Release notes: https://github.com/bellini666/pytest-language-server/releases/tag/${{ github.ref_name }}
-        env:
-          COMMITTER_TOKEN: ${{ secrets.COMMITTER_TOKEN }}
