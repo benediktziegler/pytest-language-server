@@ -72,9 +72,7 @@ impl FixtureDatabase {
         if let Some(cached) = self.file_cache.get(file_path) {
             Some(Arc::clone(cached.value()))
         } else {
-            std::fs::read_to_string(file_path)
-                .ok()
-                .map(Arc::new)
+            std::fs::read_to_string(file_path).ok().map(Arc::new)
         }
     }
 
