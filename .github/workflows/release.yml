@@ -330,26 +330,86 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: extensions/intellij-plugin/dist/pytest-language-server-*.zip
-      - name: Publish to JetBrains Marketplace
+      - name: Verify plugin compatibility
         run: |
-          # Install plugin-verifier and marketplace tools
+          # Download plugin verifier
           curl -L https://github.com/JetBrains/intellij-plugin-verifier/releases/download/1.307/plugin-verifier-1.307-all.jar -o plugin-verifier.jar
-          # For now, just upload to GitHub releases
-          # Manual JetBrains publishing requires their CLI tool or web upload
-          echo "Plugin built and uploaded to GitHub releases"
-          echo "Upload manually to https://plugins.jetbrains.com/plugin/add"
+          # Run verification (informational only)
+          PLUGIN_ZIP=$(ls extensions/intellij-plugin/dist/pytest-language-server-*.zip | head -1)
+          java -jar plugin-verifier.jar check-plugin "$PLUGIN_ZIP" || true
+        continue-on-error: true
+      - name: Publish to JetBrains Marketplace
+        env:
+          JETBRAINS_TOKEN: ${{ secrets.JETBRAINS_TOKEN }}
+          JETBRAINS_PLUGIN_ID: ${{ secrets.JETBRAINS_PLUGIN_ID }}
+        run: |
+          PLUGIN_ZIP=$(ls extensions/intellij-plugin/dist/pytest-language-server-*.zip | head -1)
+          
+          if [ -z "$JETBRAINS_TOKEN" ] || [ -z "$JETBRAINS_PLUGIN_ID" ]; then
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "⚠️  JetBrains Marketplace publishing skipped"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo ""
+            echo "✅ Plugin built successfully: $PLUGIN_ZIP"
+            echo "✅ Plugin uploaded to GitHub release"
+            echo ""
+            echo "📦 To publish to JetBrains Marketplace:"
+            echo ""
+            echo "   Option 1 - Manual upload (first time):"
+            echo "   1. Visit https://plugins.jetbrains.com/plugin/add"
+            echo "   2. Download the plugin ZIP from GitHub releases"
+            echo "   3. Upload and complete the listing"
+            echo "   4. Note the plugin ID for automated future releases"
+            echo ""
+            echo "   Option 2 - Automated (after first publish):"
+            echo "   1. Get permanent token: https://plugins.jetbrains.com/author/me/tokens"
+            echo "   2. Add secrets to repository settings:"
+            echo "      - JETBRAINS_TOKEN: your permanent token"
+            echo "      - JETBRAINS_PLUGIN_ID: plugin ID from marketplace"
+            echo "   3. Future releases will auto-publish"
+            echo ""
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          else
+            echo "🚀 Publishing to JetBrains Marketplace (Plugin ID: $JETBRAINS_PLUGIN_ID)..."
+            
+            RESPONSE=$(curl -s -w "\n%{http_code}" \
+              --header "Authorization: Bearer $JETBRAINS_TOKEN" \
+              -F pluginId="$JETBRAINS_PLUGIN_ID" \
+              -F file=@"$PLUGIN_ZIP" \
+              https://plugins.jetbrains.com/plugin/uploadPlugin)
+            
+            HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+            BODY=$(echo "$RESPONSE" | head -n-1)
+            
+            if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
+              echo "✅ Successfully published to JetBrains Marketplace!"
+            else
+              echo "❌ Failed to publish to JetBrains Marketplace"
+              echo "HTTP Status: $HTTP_CODE"
+              echo "Response: $BODY"
+              exit 1
+            fi
+          fi
 
   publish-zed:
     name: Publish Zed extension
     runs-on: ubuntu-latest
-    # Disabled: Zed extension must be manually added as submodule first
-    # Follow instructions in extensions/zed-extension/PUBLISHING.md
-    if: false && startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/')
     steps:
+      - uses: actions/checkout@v4
+      - name: Debug - Check version and extension info
+        run: |
+          echo "Current version in extension.toml:"
+          grep "^version" extensions/zed-extension/extension.toml
+          echo "Git tag: ${{ github.ref_name }}"
       - uses: huacnlee/zed-extension-action@v1
         with:
           extension-name: pytest-language-server
           extension-path: extensions/zed-extension
           push-to: bellini666/extensions
+          commit-message: |
+            Update pytest-language-server to ${{ github.ref_name }}
+            
+            Release notes: https://github.com/bellini666/pytest-language-server/releases/tag/${{ github.ref_name }}
         env:
           COMMITTER_TOKEN: ${{ secrets.COMMITTER_TOKEN }}
