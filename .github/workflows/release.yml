@@ -344,7 +344,7 @@ jobs:
           JETBRAINS_PLUGIN_ID: ${{ secrets.JETBRAINS_PLUGIN_ID }}
         run: |
           PLUGIN_ZIP=$(ls extensions/intellij-plugin/dist/pytest-language-server-*.zip | head -1)
-          
+
           if [ -z "$JETBRAINS_TOKEN" ] || [ -z "$JETBRAINS_PLUGIN_ID" ]; then
             echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             echo "⚠️  JetBrains Marketplace publishing skipped"
@@ -371,16 +371,16 @@ jobs:
             echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           else
             echo "🚀 Publishing to JetBrains Marketplace (Plugin ID: $JETBRAINS_PLUGIN_ID)..."
-            
+
             RESPONSE=$(curl -s -w "\n%{http_code}" \
               --header "Authorization: Bearer $JETBRAINS_TOKEN" \
               -F pluginId="$JETBRAINS_PLUGIN_ID" \
               -F file=@"$PLUGIN_ZIP" \
               https://plugins.jetbrains.com/plugin/uploadPlugin)
-            
+
             HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
             BODY=$(echo "$RESPONSE" | head -n-1)
-            
+
             if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
               echo "✅ Successfully published to JetBrains Marketplace!"
             else
@@ -402,6 +402,10 @@ jobs:
           echo "Current version in extension.toml:"
           grep "^version" extensions/zed-extension/extension.toml
           echo "Git tag: ${{ github.ref_name }}"
+      - name: Sync fork with upstream
+        run: |
+          echo "Note: Ensure bellini666/extensions fork is synced with zed-industries/extensions"
+          echo "The action requires the pytest-language-server entry to exist in your fork"
       - uses: huacnlee/zed-extension-action@v1
         with:
           extension-name: pytest-language-server
@@ -409,7 +413,7 @@ jobs:
           push-to: bellini666/extensions
           commit-message: |
             Update pytest-language-server to ${{ github.ref_name }}
-            
+
             Release notes: https://github.com/bellini666/pytest-language-server/releases/tag/${{ github.ref_name }}
         env:
           COMMITTER_TOKEN: ${{ secrets.COMMITTER_TOKEN }}
