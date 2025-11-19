@@ -93,4 +93,10 @@ tasks {
     buildSearchableOptions {
         enabled = false
     }
+
+    // Disable instrumentCode to avoid dependency resolution issues with JetBrains Maven
+    // This task performs bytecode instrumentation which is not critical for our simple LSP extension
+    instrumentCode {
+        enabled = false
+    }
 }
