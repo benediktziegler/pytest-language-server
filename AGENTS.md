@@ -2,12 +2,27 @@
 
 This document helps AI agents understand the pytest-language-server codebase structure, architecture, and development practices.
 
+## AI Agent Workflow Rules
+
+**IMPORTANT**: When the user asks you to make changes or complete a task, follow this workflow:
+
+1. Complete the requested task fully
+2. **ALWAYS** ask the user if they want to:
+   - Commit the changes
+   - Commit and push the changes
+   - Leave the changes uncommitted
+3. **NEVER** commit or push changes automatically without explicit user confirmation
+4. If the user confirms they want to commit, create an appropriate commit message following the project's commit style
+5. Only push to remote if the user explicitly requests it
+
+This ensures the user maintains full control over their git workflow.
+
 ## Project Overview
 
 **pytest-language-server** is a Language Server Protocol (LSP) implementation for pytest fixtures, written in Rust. It provides IDE features like go-to-definition, find-references, and hover documentation for pytest fixtures.
 
 - **Language**: Rust (Edition 2021, MSRV 1.83)
-- **Lines of Code**: ~3,050 lines (2,256 in fixtures.rs, 794 in main.rs)
+- **Lines of Code**: ~3,050 lines (2,254 in fixtures.rs, 792 in main.rs)
 - **Architecture**: Async LSP server using tower-lsp
 - **Key Features**: Fixture go-to-definition, find-references, hover docs, fixture overriding, undeclared fixture diagnostics
 
@@ -146,12 +161,12 @@ This is handled by `start_char` and `end_char` in `FixtureUsage`.
 
 ```
 src/
-├── fixtures.rs           # Main code (2,256 lines)
-└── main.rs              # LSP server (794 lines)
+├── fixtures.rs           # Main code (2,254 lines)
+└── main.rs              # LSP server (792 lines)
 
 tests/
-├── test_fixtures.rs     # FixtureDatabase integration tests (60 tests, 2,951 lines)
-├── test_lsp.rs         # LSP protocol tests (13 tests, 1,187 lines)
+├── test_fixtures.rs     # FixtureDatabase integration tests (60 tests, 2,950 lines)
+├── test_lsp.rs         # LSP protocol tests (13 tests, 1,181 lines)
 └── test_project/       # Fixture test files for integration tests
     ├── conftest.py
     ├── test_example.py
@@ -173,7 +188,7 @@ RUST_LOG=debug cargo test          # Run with debug logging
 
 ### Test Coverage
 
-- **73 total tests passing** (as of v0.6.0)
+- **73 total tests passing** (as of v0.7.2)
   - 60 integration tests in `tests/test_fixtures.rs` (FixtureDatabase API)
   - 13 integration tests in `tests/test_lsp.rs` (LSP protocol handlers)
 
@@ -239,9 +254,12 @@ git add -A && git commit -m "chore: bump version to X.Y.Z"
 ### Pre-commit Hooks
 
 The project uses pre-commit hooks defined in `.pre-commit-config.yaml`:
-- `cargo fmt --check` - Format checking
-- `cargo clippy` - Linting
-- `cargo audit` - Security vulnerability scanning
+- `cargo fmt` - Code formatting
+- `cargo clippy` - Linting with warnings as errors
+- `cargo check` - Build checking
+- `cargo audit` - Security vulnerability scanning (pre-push only)
+- `cargo deny` - License and security checks (pre-push only)
+- General file checks: trailing whitespace, end-of-file fixer, YAML/TOML validation, large file detection, merge conflict detection, mixed line ending detection
 
 Install with: `pre-commit install`
 
@@ -261,8 +279,8 @@ Install with: `pre-commit install`
    - `find_fixture_definition()` for go-to-definition
    - `find_all_references()` for find-references
    - `analyze_file()` if changing what fixtures are detected
-2. Add test cases to `src/fixtures.rs` tests
-3. Run `cargo test` to ensure all 52 tests pass
+2. Add test cases to `tests/test_fixtures.rs`
+3. Run `cargo test` to ensure all 73 tests pass
 4. Consider edge cases: self-referencing fixtures, multiline signatures, conftest.py hierarchy
 
 ### Debugging LSP Issues
@@ -366,7 +384,7 @@ Critical LSP specification requirements:
 ## Troubleshooting
 
 ### Tests failing after fixture logic changes
-- Check that all 52 tests pass: `cargo test`
+- Check that all 73 tests pass: `cargo test`
 - Focus on failing tests in `fixtures.rs` (fixture resolution) or `main.rs` (LSP handlers)
 - Common issue: fixture priority rules not respecting conftest.py hierarchy
 
@@ -381,13 +399,49 @@ Critical LSP specification requirements:
 - Check that `start_char` and `end_char` are correctly set in `FixtureUsage`
 - Verify `find_fixture_at_position()` is checking character bounds
 
+## Editor Extensions
+
+The project includes extensions for three major editors/IDEs:
+
+### VSCode Extension (`extensions/vscode-extension/`)
+- **Status**: ✅ Production-ready
+- **Language**: TypeScript
+- **Build**: Webpack bundled
+- **Publishing**: Automated via GitHub Actions to VSCode Marketplace
+- **Binaries**: Bundles platform-specific binaries in release
+- **Key files**: `package.json`, `src/extension.ts`, `.eslintrc.json`
+
+### Zed Extension (`extensions/zed-extension/`)
+- **Status**: ✅ Production-ready
+- **Language**: Rust (WASM)
+- **Build**: Cargo build to WASM
+- **Publishing**: Manual submission to Zed extensions repository
+- **Binaries**: Users install pytest-language-server separately (pip/cargo/brew)
+- **Key files**: `extension.toml`, `Cargo.toml`, `src/lib.rs`, `PUBLISHING.md`
+
+### IntelliJ Plugin (`extensions/intellij-plugin/`)
+- **Status**: ⚠️ Work in progress (LSP integration incomplete)
+- **Language**: Kotlin
+- **Build**: Custom build.sh script (needs Gradle migration)
+- **Publishing**: Automated via GitHub Actions to JetBrains Marketplace
+- **Binaries**: Bundles platform-specific binaries in release
+- **Key files**: `plugin.xml`, Kotlin source files
+- **TODO**: Implement actual LSP client integration, migrate to Gradle
+
+### Extension Development Notes
+- All extensions share the same version number (synchronized via `bump-version.sh`)
+- VSCode and IntelliJ bundle binaries; Zed expects user installation
+- Extension metadata should point to GitHub releases for changelogs
+- Copyright holder: Thiago Bellini Ribeiro (updated as of v0.7.2)
+
 ## Additional Resources
 
 - **README.md** - User-facing documentation and setup instructions
 - **SECURITY.md** - Security policy and vulnerability reporting
 - **RELEASE.md** - Release process documentation
+- **EXTENSION_PUBLISHING.md** - Extension publishing guide
+- **EXTENSION_SETUP.md** - Extension development setup
 - **tests/test_project/** - Example pytest project for testing
-- **zed-extension/** - Zed editor extension source
 
 ## Contributing Guidelines
 
@@ -401,6 +455,7 @@ Critical LSP specification requirements:
 
 ## Version History
 
+- **v0.7.2** (November 2025) - Current version with improved extension metadata
 - **v0.5.1** (November 2025) - Critical fix for deterministic fixture resolution, path canonicalization, 8 new comprehensive hierarchy tests
 - **v0.5.0** (November 2025) - Undeclared fixture diagnostics, code actions (quick fixes), line-aware scoping, LSP compliance improvements
 - **v0.4.0** (November 2025) - Character-position aware references, LSP spec compliance
@@ -409,6 +464,6 @@ Critical LSP specification requirements:
 
 ---
 
-**Last Updated**: v0.5.1 (November 2025)
+**Last Updated**: v0.7.2 (November 2025)
 
 This document should be updated when making significant architectural changes or adding new features.
