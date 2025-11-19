@@ -192,10 +192,10 @@ jobs:
 
       - name: Flatten binaries directory
         run: |
-          mkdir -p dist/binaries
-          find binaries -type f -name "pytest-language-server*" -exec cp {} dist/binaries/ \;
-          chmod +x dist/binaries/* || true
-          ls -lh dist/binaries/
+          mkdir -p binaries-dist
+          find binaries -type f -name "pytest-language-server*" -exec cp {} binaries-dist/ \;
+          chmod +x binaries-dist/* || true
+          ls -lh binaries-dist/
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -203,7 +203,7 @@ jobs:
           files: |
             dist/*.whl
             dist/*.tar.gz
-            dist/binaries/*
+            binaries-dist/*
           generate_release_notes: true
           fail_on_unmatched_files: true
 
