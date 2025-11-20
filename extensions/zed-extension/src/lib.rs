@@ -74,20 +74,10 @@ impl PytestLspExtension {
         }
 
         // Priority 2: Download binary from GitHub releases
-        let binary_name = self.get_binary_name(platform, arch)?;
-        let binary_path = format!("bin/{}", binary_name);
-
-        // Check if already downloaded
-        if fs::metadata(&binary_path).is_ok() {
-            zed::make_file_executable(&binary_path)?;
-            self.cached_binary_path = Some(binary_path.clone());
-            return Ok(binary_path);
-        }
-
-        // Download from GitHub release
+        // Get the latest release first to determine version
         zed::set_language_server_installation_status(
             language_server_id,
-            &LanguageServerInstallationStatus::Downloading,
+            &LanguageServerInstallationStatus::CheckingForUpdate,
         );
 
         let repo = format!("{}/{}", OWNER, REPO);
@@ -98,6 +88,28 @@ impl PytestLspExtension {
                 pre_release: false,
             },
         )?;
+
+        // Version the binary path to allow updates
+        let binary_name = self.get_binary_name(platform, arch)?;
+        let version_dir = format!("bin/{}", release.version);
+        let binary_path = format!("{}/{}", version_dir, binary_name);
+
+        // Check if this version is already downloaded
+        if fs::metadata(&binary_path).is_ok() {
+            zed::make_file_executable(&binary_path)?;
+            self.cached_binary_path = Some(binary_path.clone());
+
+            // Clean up old versions
+            self.cleanup_old_versions(&release.version);
+
+            return Ok(binary_path);
+        }
+
+        // Download from GitHub release
+        zed::set_language_server_installation_status(
+            language_server_id,
+            &LanguageServerInstallationStatus::Downloading,
+        );
 
         let asset_name = binary_name;
         let asset = release
@@ -111,8 +123,9 @@ impl PytestLspExtension {
                 )
             })?;
 
-        // Create bin directory if it doesn't exist
-        fs::create_dir_all("bin").map_err(|e| format!("failed to create bin directory: {}", e))?;
+        // Create versioned directory if it doesn't exist
+        fs::create_dir_all(&version_dir)
+            .map_err(|e| format!("failed to create version directory: {}", e))?;
 
         zed::download_file(
             &asset.download_url,
@@ -129,8 +142,38 @@ impl PytestLspExtension {
             &LanguageServerInstallationStatus::None,
         );
 
+        // Clean up old versions after successful download
+        self.cleanup_old_versions(&release.version);
+
         self.cached_binary_path = Some(binary_path.clone());
         Ok(binary_path)
+    }
+
+    fn cleanup_old_versions(&self, current_version: &str) {
+        // Attempt to remove old version directories, but don't fail if we can't
+        let Ok(entries) = fs::read_dir("bin") else {
+            return;
+        };
+
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+
+            if !file_type.is_dir() {
+                continue;
+            }
+
+            let file_name = entry.file_name();
+            let Some(dir_name) = file_name.to_str() else {
+                continue;
+            };
+
+            // Remove any version directory that's not the current one
+            if dir_name != current_version {
+                let _ = fs::remove_dir_all(entry.path());
+            }
+        }
     }
 
     fn get_binary_name(&self, platform: zed::Os, arch: zed::Architecture) -> Result<String> {

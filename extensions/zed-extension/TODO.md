@@ -2,9 +2,11 @@
 
 ## Design Philosophy
 
-This extension follows the **simple approach**: users install `pytest-language-server` via their preferred method (pip, uv, cargo, homebrew), and the extension just finds it in PATH.
+This extension follows a **hybrid approach**:
+1. **Priority 1**: Check PATH first (user installs via pip, uv, cargo, homebrew)
+2. **Priority 2**: Auto-download from GitHub releases with version management
 
-This is simpler to maintain and matches how most LSP extensions work (e.g., rust-analyzer, pyright, etc.).
+This provides both simplicity for power users and convenience for new users.
 
 ## Future Improvements
 

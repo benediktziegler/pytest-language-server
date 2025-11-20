@@ -30,10 +30,12 @@ The extension intelligently handles the language server binary:
 
 1. **Check PATH**: First, it looks for `pytest-language-server` in your PATH (if you installed via pip, cargo, or brew)
 2. **Auto-Download**: If not found, it automatically downloads the pre-built binary from GitHub Releases for your platform
-3. **Cache**: Downloaded binaries are cached in the extension directory for future use
+3. **Version Management**: Downloaded binaries are stored in version-specific directories (e.g., `bin/v0.7.2/`)
+4. **Auto-Update**: When a new version is released, it downloads the new version and cleans up old ones
+5. **Cache**: Downloaded binaries are cached for future use
 
 This means you can either:
-- **Do nothing** - the extension handles everything automatically
+- **Do nothing** - the extension handles everything automatically (including updates!)
 - **Install manually** (via pip/cargo/brew) - the extension will use your installation
 
 ## Configuration
