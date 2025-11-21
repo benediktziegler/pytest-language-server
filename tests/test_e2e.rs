@@ -10,6 +10,22 @@ use predicates::prelude::*;
 use pytest_language_server::FixtureDatabase;
 use std::path::PathBuf;
 
+// Helper function to normalize paths in output for cross-platform testing
+fn normalize_path_in_output(output: &str) -> String {
+    // Get the absolute path to tests/test_project
+    let test_project_path = std::env::current_dir()
+        .unwrap()
+        .join("tests/test_project")
+        .canonicalize()
+        .unwrap();
+
+    // Replace the absolute path with a placeholder
+    output.replace(
+        &test_project_path.to_string_lossy().to_string(),
+        "<TEST_PROJECT_PATH>",
+    )
+}
+
 // MARK: CLI E2E Tests
 
 #[test]
@@ -28,8 +44,11 @@ fn test_cli_fixtures_list_full_output() {
     // Convert output to string and normalize for snapshot testing
     let stdout = String::from_utf8_lossy(&output.stdout);
 
+    // Normalize path for cross-platform snapshot testing
+    let normalized = normalize_path_in_output(&stdout);
+
     // Snapshot the output (colors will be in the output)
-    assert_snapshot!("cli_fixtures_list_full", stdout);
+    assert_snapshot!("cli_fixtures_list_full", normalized);
 }
 
 #[test]
@@ -46,7 +65,8 @@ fn test_cli_fixtures_list_skip_unused() {
     assert!(output.status.success());
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert_snapshot!("cli_fixtures_list_skip_unused", stdout);
+    let normalized = normalize_path_in_output(&stdout);
+    assert_snapshot!("cli_fixtures_list_skip_unused", normalized);
 }
 
 #[test]
@@ -63,7 +83,8 @@ fn test_cli_fixtures_list_only_unused() {
     assert!(output.status.success());
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert_snapshot!("cli_fixtures_list_only_unused", stdout);
+    let normalized = normalize_path_in_output(&stdout);
+    assert_snapshot!("cli_fixtures_list_only_unused", normalized);
 }
 
 #[test]
