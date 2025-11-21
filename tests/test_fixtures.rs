@@ -4978,3 +4978,892 @@ def my_fixture():
     let defs = db.definitions.get("my_fixture").unwrap();
     assert_eq!(defs.len(), 1);
 }
+
+// MARK: Docstring Variation Tests
+
+#[test]
+fn test_fixture_with_empty_docstring() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    """"""
+    return "test"
+"#;
+    let path = PathBuf::from("/tmp/test/test_example.py");
+    db.analyze_file(path, content);
+
+    let defs = db.definitions.get("my_fixture").unwrap();
+    assert_eq!(defs.len(), 1);
+    // Empty docstring might be None or Some("")
+    if let Some(doc) = &defs[0].docstring {
+        assert!(doc.trim().is_empty());
+    }
+}
+
+#[test]
+fn test_fixture_with_multiline_docstring() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    """
+    This is a multi-line docstring.
+
+    It has multiple paragraphs.
+
+    Args:
+        None
+
+    Returns:
+        str: A test string
+    """
+    return "test"
+"#;
+    let path = PathBuf::from("/tmp/test/test_example.py");
+    db.analyze_file(path, content);
+
+    let defs = db.definitions.get("my_fixture").unwrap();
+    assert_eq!(defs.len(), 1);
+    assert!(defs[0].docstring.is_some());
+    let docstring = defs[0].docstring.as_ref().unwrap();
+    assert!(docstring.contains("multi-line"));
+    assert!(docstring.contains("Returns:"));
+}
+
+#[test]
+fn test_fixture_with_single_quoted_docstring() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    '''Single quoted docstring'''
+    return "test"
+"#;
+    let path = PathBuf::from("/tmp/test/test_example.py");
+    db.analyze_file(path, content);
+
+    let defs = db.definitions.get("my_fixture").unwrap();
+    assert_eq!(defs.len(), 1);
+    assert!(defs[0].docstring.is_some());
+    assert_eq!(
+        defs[0].docstring.as_ref().unwrap().trim(),
+        "Single quoted docstring"
+    );
+}
+
+#[test]
+fn test_fixture_with_rst_formatted_docstring() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    """
+    Fixture with RST formatting.
+
+    :param param1: First parameter
+    :type param1: str
+    :returns: Test value
+    :rtype: str
+
+    .. note::
+        This is a note block
+    """
+    return "test"
+"#;
+    let path = PathBuf::from("/tmp/test/test_example.py");
+    db.analyze_file(path, content);
+
+    let defs = db.definitions.get("my_fixture").unwrap();
+    assert_eq!(defs.len(), 1);
+    assert!(defs[0].docstring.is_some());
+    let docstring = defs[0].docstring.as_ref().unwrap();
+    assert!(docstring.contains(":param"));
+    assert!(docstring.contains(".. note::"));
+}
+
+#[test]
+fn test_fixture_with_google_style_docstring() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    """Fixture with Google-style docstring.
+
+    This fixture provides a test value.
+
+    Args:
+        None
+
+    Returns:
+        str: A test string value
+
+    Yields:
+        str: Test value for the fixture
+    """
+    return "test"
+"#;
+    let path = PathBuf::from("/tmp/test/test_example.py");
+    db.analyze_file(path, content);
+
+    let defs = db.definitions.get("my_fixture").unwrap();
+    assert_eq!(defs.len(), 1);
+    assert!(defs[0].docstring.is_some());
+    let docstring = defs[0].docstring.as_ref().unwrap();
+    assert!(docstring.contains("Args:"));
+    assert!(docstring.contains("Returns:"));
+    assert!(docstring.contains("Yields:"));
+}
+
+#[test]
+fn test_fixture_with_numpy_style_docstring() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    """
+    Fixture with NumPy-style docstring.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    str
+        A test string value
+
+    Notes
+    -----
+    This is a test fixture
+    """
+    return "test"
+"#;
+    let path = PathBuf::from("/tmp/test/test_example.py");
+    db.analyze_file(path, content);
+
+    let defs = db.definitions.get("my_fixture").unwrap();
+    assert_eq!(defs.len(), 1);
+    assert!(defs[0].docstring.is_some());
+    let docstring = defs[0].docstring.as_ref().unwrap();
+    assert!(docstring.contains("Parameters"));
+    assert!(docstring.contains("----------"));
+    assert!(docstring.contains("Returns"));
+}
+
+#[test]
+fn test_fixture_with_unicode_in_docstring() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    """
+    Fixture with Unicode characters: 日本語, Русский, العربية, 🎉
+
+    This tests international character support in docstrings.
+    """
+    return "test"
+"#;
+    let path = PathBuf::from("/tmp/test/test_example.py");
+    db.analyze_file(path, content);
+
+    let defs = db.definitions.get("my_fixture").unwrap();
+    assert_eq!(defs.len(), 1);
+    assert!(defs[0].docstring.is_some());
+    let docstring = defs[0].docstring.as_ref().unwrap();
+    assert!(docstring.contains("日本語"));
+    assert!(docstring.contains("Русский"));
+    assert!(docstring.contains("🎉"));
+}
+
+#[test]
+fn test_fixture_with_code_blocks_in_docstring() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    """
+    Fixture with code examples.
+
+    Example:
+        >>> result = my_fixture()
+        >>> assert result == "test"
+
+    Code block:
+        ```python
+        def use_fixture(my_fixture):
+            print(my_fixture)
+        ```
+    """
+    return "test"
+"#;
+    let path = PathBuf::from("/tmp/test/test_example.py");
+    db.analyze_file(path, content);
+
+    let defs = db.definitions.get("my_fixture").unwrap();
+    assert_eq!(defs.len(), 1);
+    assert!(defs[0].docstring.is_some());
+    let docstring = defs[0].docstring.as_ref().unwrap();
+    assert!(docstring.contains(">>>"));
+    assert!(docstring.contains("```python"));
+}
+
+// MARK: Performance and Scalability Tests
+
+#[test]
+fn test_large_number_of_fixtures_in_single_file() {
+    let db = FixtureDatabase::new();
+
+    // Generate a file with 100 fixtures
+    let mut content = String::from("import pytest\n\n");
+    for i in 0..100 {
+        content.push_str(&format!(
+            "@pytest.fixture\ndef fixture_{}():\n    return {}\n\n",
+            i, i
+        ));
+    }
+
+    let path = PathBuf::from("/tmp/test/test_many_fixtures.py");
+    db.analyze_file(path, &content);
+
+    // Should have all 100 fixtures
+    assert_eq!(db.definitions.len(), 100);
+
+    // Verify a few specific ones
+    assert!(db.definitions.get("fixture_0").is_some());
+    assert!(db.definitions.get("fixture_50").is_some());
+    assert!(db.definitions.get("fixture_99").is_some());
+}
+
+#[test]
+fn test_deeply_nested_fixture_dependencies() {
+    let db = FixtureDatabase::new();
+
+    // Create a chain of 20 fixtures depending on each other
+    let mut content = String::from("import pytest\n\n");
+    content.push_str("@pytest.fixture\ndef fixture_0():\n    return 0\n\n");
+
+    for i in 1..20 {
+        content.push_str(&format!(
+            "@pytest.fixture\ndef fixture_{}(fixture_{}):\n    return {} + fixture_{}\n\n",
+            i,
+            i - 1,
+            i,
+            i - 1
+        ));
+    }
+
+    let path = PathBuf::from("/tmp/test/test_deep_chain.py");
+    db.analyze_file(path, &content);
+
+    // Should detect all fixtures
+    assert_eq!(db.definitions.len(), 20);
+
+    // Verify the deepest one
+    let deepest = db.definitions.get("fixture_19").unwrap();
+    assert_eq!(deepest.len(), 1);
+}
+
+#[test]
+fn test_fixture_with_many_parameters() {
+    let db = FixtureDatabase::new();
+
+    // Create fixtures first
+    let mut content = String::from("import pytest\n\n");
+    for i in 0..15 {
+        content.push_str(&format!(
+            "@pytest.fixture\ndef dep_{}():\n    return {}\n\n",
+            i, i
+        ));
+    }
+
+    // Create a fixture that depends on all of them
+    content.push_str("@pytest.fixture\ndef mega_fixture(");
+    for i in 0..15 {
+        if i > 0 {
+            content.push_str(", ");
+        }
+        content.push_str(&format!("dep_{}", i));
+    }
+    content.push_str("):\n    return sum([");
+    for i in 0..15 {
+        if i > 0 {
+            content.push_str(", ");
+        }
+        content.push_str(&format!("dep_{}", i));
+    }
+    content.push_str("])\n");
+
+    let path = PathBuf::from("/tmp/test/test_many_params.py");
+    db.analyze_file(path, &content);
+
+    // Should have all 16 fixtures (15 deps + 1 mega)
+    assert_eq!(db.definitions.len(), 16);
+    assert!(db.definitions.get("mega_fixture").is_some());
+}
+
+#[test]
+fn test_very_long_fixture_function_body() {
+    let db = FixtureDatabase::new();
+
+    // Create a fixture with a very long function body (100 lines)
+    let mut content = String::from("import pytest\n\n@pytest.fixture\ndef long_fixture():\n");
+    content.push_str("    \"\"\"A fixture with a very long body.\"\"\"\n");
+    for i in 0..100 {
+        content.push_str(&format!("    line_{} = {}\n", i, i));
+    }
+    content.push_str("    return line_99\n");
+
+    let path = PathBuf::from("/tmp/test/test_long_function.py");
+    db.analyze_file(path, &content);
+
+    let defs = db.definitions.get("long_fixture").unwrap();
+    assert_eq!(defs.len(), 1);
+    assert!(defs[0].docstring.is_some());
+}
+
+#[test]
+fn test_multiple_files_with_same_fixture_names() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def shared_fixture():
+    return "value"
+"#;
+
+    // Analyze the same fixture in 50 different files
+    for i in 0..50 {
+        let path = PathBuf::from(format!("/tmp/test/dir_{}/test_file.py", i));
+        db.analyze_file(path, content);
+    }
+
+    // Should have one fixture name with 50 definitions
+    let defs = db.definitions.get("shared_fixture").unwrap();
+    assert_eq!(defs.len(), 50);
+}
+
+#[test]
+fn test_rapid_file_updates() {
+    let db = FixtureDatabase::new();
+
+    let path = PathBuf::from("/tmp/test/test_updates.py");
+
+    // Simulate rapid updates to the same file
+    for i in 0..20 {
+        let content = format!(
+            r#"
+import pytest
+
+@pytest.fixture
+def dynamic_fixture():
+    return {}
+"#,
+            i
+        );
+        db.analyze_file(path.clone(), &content);
+    }
+
+    // Should have just one definition (the latest update)
+    let defs = db.definitions.get("dynamic_fixture").unwrap();
+    assert_eq!(defs.len(), 1);
+    assert_eq!(defs[0].file_path, path);
+}
+
+// MARK: Virtual Environment Variation Tests
+
+#[test]
+fn test_fixture_detection_without_venv() {
+    let db = FixtureDatabase::new();
+
+    // Create a test project without scanning venv
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return "test"
+
+def test_example(my_fixture):
+    assert my_fixture == "test"
+"#;
+    let path = PathBuf::from("/tmp/test/test_example.py");
+    db.analyze_file(path.clone(), content);
+
+    // Should still work without venv
+    let defs = db.definitions.get("my_fixture").unwrap();
+    assert_eq!(defs.len(), 1);
+
+    let usages = db.usages.get(&path).unwrap();
+    assert_eq!(usages.len(), 1);
+}
+
+#[test]
+fn test_third_party_fixture_in_site_packages() {
+    let db = FixtureDatabase::new();
+
+    // Simulate a third-party plugin fixture
+    let plugin_content = r#"
+import pytest
+
+@pytest.fixture
+def third_party_fixture():
+    """A fixture from a third-party plugin."""
+    return "plugin_value"
+"#;
+
+    // Analyze as if it's from site-packages
+    let plugin_path =
+        PathBuf::from("/tmp/venv/lib/python3.11/site-packages/pytest_plugin/fixtures.py");
+    db.analyze_file(plugin_path, plugin_content);
+
+    // Now use it in a test file
+    let test_content = r#"
+def test_example(third_party_fixture):
+    assert third_party_fixture == "plugin_value"
+"#;
+    let test_path = PathBuf::from("/tmp/test/test_example.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Should detect both definition and usage
+    let defs = db.definitions.get("third_party_fixture").unwrap();
+    assert_eq!(defs.len(), 1);
+
+    let usages = db.usages.get(&test_path).unwrap();
+    assert_eq!(usages.len(), 1);
+}
+
+#[test]
+fn test_fixture_override_from_third_party() {
+    let db = FixtureDatabase::new();
+
+    // Third-party plugin defines a fixture
+    let plugin_content = r#"
+import pytest
+
+@pytest.fixture
+def event_loop():
+    """Plugin event loop fixture."""
+    return "plugin_loop"
+"#;
+    let plugin_path =
+        PathBuf::from("/tmp/venv/lib/python3.11/site-packages/pytest_asyncio/fixtures.py");
+    db.analyze_file(plugin_path.clone(), plugin_content);
+
+    // User overrides it in conftest.py
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def event_loop():
+    """Custom event loop fixture."""
+    return "custom_loop"
+"#;
+    let conftest_path = PathBuf::from("/tmp/project/conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    // Test uses it
+    let test_content = r#"
+def test_example(event_loop):
+    assert event_loop is not None
+"#;
+    let test_path = PathBuf::from("/tmp/project/test_example.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Should have 2 definitions (plugin + override)
+    let defs = db.definitions.get("event_loop").unwrap();
+    assert_eq!(defs.len(), 2);
+
+    // Verify the conftest definition is present
+    let conftest_def = defs.iter().find(|d| d.file_path == conftest_path);
+    assert!(conftest_def.is_some());
+
+    // Verify the plugin definition is present
+    let plugin_def = defs.iter().find(|d| d.file_path == plugin_path);
+    assert!(plugin_def.is_some());
+}
+
+#[test]
+fn test_multiple_third_party_plugins_same_fixture() {
+    let db = FixtureDatabase::new();
+
+    // Plugin 1 defines a fixture
+    let plugin1_content = r#"
+import pytest
+
+@pytest.fixture
+def common_fixture():
+    return "plugin1"
+"#;
+    let plugin1_path =
+        PathBuf::from("/tmp/venv/lib/python3.11/site-packages/pytest_plugin1/fixtures.py");
+    db.analyze_file(plugin1_path, plugin1_content);
+
+    // Plugin 2 also defines the same fixture name
+    let plugin2_content = r#"
+import pytest
+
+@pytest.fixture
+def common_fixture():
+    return "plugin2"
+"#;
+    let plugin2_path =
+        PathBuf::from("/tmp/venv/lib/python3.11/site-packages/pytest_plugin2/fixtures.py");
+    db.analyze_file(plugin2_path, plugin2_content);
+
+    // Should have both definitions
+    let defs = db.definitions.get("common_fixture").unwrap();
+    assert_eq!(defs.len(), 2);
+}
+
+#[test]
+fn test_venv_fixture_with_no_usage() {
+    let db = FixtureDatabase::new();
+
+    // Third-party fixture that's never used
+    let plugin_content = r#"
+import pytest
+
+@pytest.fixture
+def unused_plugin_fixture():
+    """A fixture that's defined but never used."""
+    return "unused"
+"#;
+    let plugin_path =
+        PathBuf::from("/tmp/venv/lib/python3.11/site-packages/pytest_plugin/fixtures.py");
+    db.analyze_file(plugin_path, plugin_content);
+
+    // Should still be in definitions
+    let defs = db.definitions.get("unused_plugin_fixture").unwrap();
+    assert_eq!(defs.len(), 1);
+
+    // Should have no usages
+    let refs = db.find_fixture_references("unused_plugin_fixture");
+    assert!(refs.is_empty());
+}
+
+// MARK: Miscellaneous Edge Case Tests
+
+#[test]
+fn test_fixture_with_property_decorator() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+class MyFixture:
+    @property
+    def value(self):
+        return "test"
+
+@pytest.fixture
+def my_fixture():
+    return MyFixture()
+"#;
+    let path = PathBuf::from("/tmp/test/test_example.py");
+    db.analyze_file(path, content);
+
+    let defs = db.definitions.get("my_fixture").unwrap();
+    assert_eq!(defs.len(), 1);
+}
+
+#[test]
+fn test_fixture_with_staticmethod() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+class FixtureHelper:
+    @staticmethod
+    def create():
+        return "test"
+
+@pytest.fixture
+def my_fixture():
+    return FixtureHelper.create()
+"#;
+    let path = PathBuf::from("/tmp/test/test_example.py");
+    db.analyze_file(path, content);
+
+    let defs = db.definitions.get("my_fixture").unwrap();
+    assert_eq!(defs.len(), 1);
+}
+
+#[test]
+fn test_fixture_with_classmethod() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+class FixtureHelper:
+    @classmethod
+    def create(cls):
+        return "test"
+
+@pytest.fixture
+def my_fixture():
+    return FixtureHelper.create()
+"#;
+    let path = PathBuf::from("/tmp/test/test_example.py");
+    db.analyze_file(path, content);
+
+    let defs = db.definitions.get("my_fixture").unwrap();
+    assert_eq!(defs.len(), 1);
+}
+
+#[test]
+fn test_fixture_with_contextmanager() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+from contextlib import contextmanager
+
+@contextmanager
+def resource():
+    yield "resource"
+
+@pytest.fixture
+def my_fixture():
+    with resource() as r:
+        return r
+"#;
+    let path = PathBuf::from("/tmp/test/test_example.py");
+    db.analyze_file(path, content);
+
+    let defs = db.definitions.get("my_fixture").unwrap();
+    assert_eq!(defs.len(), 1);
+}
+
+#[test]
+fn test_fixture_with_multiple_decorators() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+def custom_decorator(func):
+    return func
+
+@pytest.fixture
+@custom_decorator
+def my_fixture():
+    return "test"
+"#;
+    let path = PathBuf::from("/tmp/test/test_example.py");
+    db.analyze_file(path, content);
+
+    let defs = db.definitions.get("my_fixture").unwrap();
+    assert_eq!(defs.len(), 1);
+}
+
+#[test]
+fn test_fixture_inside_if_block_not_supported() {
+    let db = FixtureDatabase::new();
+
+    // Fixtures inside if blocks are a known limitation
+    let content = r#"
+import pytest
+import sys
+
+if sys.version_info >= (3, 8):
+    @pytest.fixture
+    def version_specific_fixture():
+        return "py38+"
+"#;
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path, content);
+
+    // Currently not detected - this is a known limitation
+    assert!(db.definitions.get("version_specific_fixture").is_none());
+}
+
+#[test]
+fn test_fixture_with_walrus_operator_in_body() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    if (result := expensive_operation()):
+        return result
+    return None
+"#;
+    let path = PathBuf::from("/tmp/test/test_example.py");
+    db.analyze_file(path, content);
+
+    let defs = db.definitions.get("my_fixture").unwrap();
+    assert_eq!(defs.len(), 1);
+}
+
+#[test]
+fn test_fixture_with_match_statement() {
+    let db = FixtureDatabase::new();
+
+    // Python 3.10+ match statement
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    value = "test"
+    match value:
+        case "test":
+            return "matched"
+        case _:
+            return "default"
+"#;
+    let path = PathBuf::from("/tmp/test/test_example.py");
+    db.analyze_file(path, content);
+
+    let defs = db.definitions.get("my_fixture").unwrap();
+    assert_eq!(defs.len(), 1);
+}
+
+#[test]
+fn test_fixture_with_exception_group() {
+    let db = FixtureDatabase::new();
+
+    // Python 3.11+ exception groups
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    try:
+        return "test"
+    except* ValueError as e:
+        return None
+"#;
+    let path = PathBuf::from("/tmp/test/test_example.py");
+    db.analyze_file(path, content);
+
+    let defs = db.definitions.get("my_fixture").unwrap();
+    assert_eq!(defs.len(), 1);
+}
+
+#[test]
+fn test_fixture_with_dataclass() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+from dataclasses import dataclass
+
+@dataclass
+class Config:
+    value: str
+
+@pytest.fixture
+def config_fixture():
+    return Config(value="test")
+"#;
+    let path = PathBuf::from("/tmp/test/test_example.py");
+    db.analyze_file(path, content);
+
+    let defs = db.definitions.get("config_fixture").unwrap();
+    assert_eq!(defs.len(), 1);
+}
+
+#[test]
+fn test_fixture_with_named_tuple() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+from typing import NamedTuple
+
+class Point(NamedTuple):
+    x: int
+    y: int
+
+@pytest.fixture
+def point_fixture():
+    return Point(1, 2)
+"#;
+    let path = PathBuf::from("/tmp/test/test_example.py");
+    db.analyze_file(path, content);
+
+    let defs = db.definitions.get("point_fixture").unwrap();
+    assert_eq!(defs.len(), 1);
+}
+
+#[test]
+fn test_fixture_with_protocol() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+from typing import Protocol
+
+class Readable(Protocol):
+    def read(self) -> str: ...
+
+@pytest.fixture
+def readable_fixture() -> Readable:
+    class TextReader:
+        def read(self) -> str:
+            return "test"
+    return TextReader()
+"#;
+    let path = PathBuf::from("/tmp/test/test_example.py");
+    db.analyze_file(path, content);
+
+    let defs = db.definitions.get("readable_fixture").unwrap();
+    assert_eq!(defs.len(), 1);
+}
+
+#[test]
+fn test_fixture_with_generic_type() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+from typing import Generic, TypeVar
+
+T = TypeVar('T')
+
+class Container(Generic[T]):
+    def __init__(self, value: T):
+        self.value = value
+
+@pytest.fixture
+def container_fixture() -> Container[str]:
+    return Container("test")
+"#;
+    let path = PathBuf::from("/tmp/test/test_example.py");
+    db.analyze_file(path, content);
+
+    let defs = db.definitions.get("container_fixture").unwrap();
+    assert_eq!(defs.len(), 1);
+}
