@@ -99,7 +99,7 @@ The LSP correctly implements pytest's fixture priority/shadowing rules:
 
 1. **Same file**: Fixtures defined in the same file have highest priority
 2. **Closest conftest.py**: Walk up directory tree looking for conftest.py
-3. **Virtual environment**: Third-party plugin fixtures (pytest-mock, pytest-asyncio, etc.)
+3. **Virtual environment**: Third-party plugin fixtures (50+ plugins supported including pytest-mock, pytest-asyncio, pytest-flask, pytest-docker, etc.)
 
 ### Character-Position Awareness
 
@@ -387,8 +387,24 @@ Python test discovery patterns:
 4. **Async fixtures**: `async def` fixtures
    - Treated the same as regular fixtures
 
-5. **Third-party fixtures**: pytest-mock, pytest-asyncio, pytest-django
+5. **Third-party fixtures**: 50+ popular pytest plugins supported
    - Scanned from virtual environment site-packages
+   - Supported plugins include:
+     - **Testing frameworks**: pytest-mock, pytest-asyncio, pytest-bdd, pytest-cases
+     - **Web frameworks**: pytest-flask, pytest-django, pytest-aiohttp, pytest-tornado, pytest-sanic, pytest-fastapi
+     - **HTTP clients**: pytest-httpx
+     - **Databases**: pytest-postgresql, pytest-mongodb, pytest-redis, pytest-mysql, pytest-elasticsearch
+     - **Infrastructure**: pytest-docker, pytest-kubernetes, pytest-rabbitmq, pytest-celery
+     - **ORM/Database tools**: pytest-sqlalchemy, pytest-alembic
+     - **Test data**: pytest-factoryboy, pytest-mimesis, pytest-lazy-fixture, pytest-freezegun
+     - **Browser testing**: pytest-selenium, pytest-playwright, pytest-splinter
+     - **Performance**: pytest-benchmark, pytest-timeout
+     - **Execution control**: pytest-xdist, pytest-retry, pytest-repeat, pytest-rerunfailures, pytest-ordering, pytest-dependency, pytest-random-order
+     - **Reporting**: pytest-html, pytest-json-report, pytest-metadata, pytest-cov
+     - **Development**: pytest-sugar, pytest-emoji, pytest-clarity, pytest-instafail
+     - **Environment**: pytest-env, pytest-dotenv
+     - **Test selection**: pytest-picked, pytest-testmon, pytest-split
+     - And more...
 
 6. **Path normalization and canonicalization** (fixed in v0.5.1)
    - All file paths are canonicalized in `analyze_file()` to handle symlinks and resolve absolute paths

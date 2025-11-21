@@ -5867,3 +5867,283 @@ def container_fixture() -> Container[str]:
     let defs = db.definitions.get("container_fixture").unwrap();
     assert_eq!(defs.len(), 1);
 }
+
+// MARK: Additional Third-Party Plugin Tests
+
+#[test]
+fn test_pytest_flask_fixtures() {
+    let db = FixtureDatabase::new();
+
+    // Simulate pytest-flask plugin fixtures
+    let plugin_content = r#"
+import pytest
+
+@pytest.fixture
+def app():
+    """Flask application fixture."""
+    from flask import Flask
+    app = Flask(__name__)
+    return app
+
+@pytest.fixture
+def client(app):
+    """Flask test client fixture."""
+    return app.test_client()
+"#;
+
+    let plugin_path =
+        PathBuf::from("/tmp/venv/lib/python3.11/site-packages/pytest_flask/fixtures.py");
+    db.analyze_file(plugin_path, plugin_content);
+
+    // Should detect both fixtures
+    assert!(db.definitions.get("app").is_some());
+    assert!(db.definitions.get("client").is_some());
+}
+
+#[test]
+fn test_pytest_httpx_fixtures() {
+    let db = FixtureDatabase::new();
+
+    let plugin_content = r#"
+import pytest
+
+@pytest.fixture
+async def async_client():
+    """HTTPX async client fixture."""
+    import httpx
+    async with httpx.AsyncClient() as client:
+        yield client
+"#;
+
+    let plugin_path =
+        PathBuf::from("/tmp/venv/lib/python3.11/site-packages/pytest_httpx/fixtures.py");
+    db.analyze_file(plugin_path, plugin_content);
+
+    assert!(db.definitions.get("async_client").is_some());
+}
+
+#[test]
+fn test_pytest_postgresql_fixtures() {
+    let db = FixtureDatabase::new();
+
+    let plugin_content = r#"
+import pytest
+
+@pytest.fixture
+def postgresql():
+    """PostgreSQL database fixture."""
+    return {"host": "localhost", "port": 5432}
+
+@pytest.fixture
+def postgresql_proc(postgresql):
+    """PostgreSQL process fixture."""
+    return postgresql
+"#;
+
+    let plugin_path =
+        PathBuf::from("/tmp/venv/lib/python3.11/site-packages/pytest_postgresql/fixtures.py");
+    db.analyze_file(plugin_path, plugin_content);
+
+    assert!(db.definitions.get("postgresql").is_some());
+    assert!(db.definitions.get("postgresql_proc").is_some());
+}
+
+#[test]
+fn test_pytest_docker_fixtures() {
+    let db = FixtureDatabase::new();
+
+    let plugin_content = r#"
+import pytest
+
+@pytest.fixture(scope="session")
+def docker_compose_file():
+    """Docker compose file fixture."""
+    return "docker-compose.yml"
+
+@pytest.fixture(scope="session")
+def docker_services(docker_compose_file):
+    """Docker services fixture."""
+    return {"web": "http://localhost:8000"}
+"#;
+
+    let plugin_path =
+        PathBuf::from("/tmp/venv/lib/python3.11/site-packages/pytest_docker/fixtures.py");
+    db.analyze_file(plugin_path, plugin_content);
+
+    assert!(db.definitions.get("docker_compose_file").is_some());
+    assert!(db.definitions.get("docker_services").is_some());
+}
+
+#[test]
+fn test_pytest_factoryboy_fixtures() {
+    let db = FixtureDatabase::new();
+
+    let plugin_content = r#"
+import pytest
+import factory
+
+class UserFactory(factory.Factory):
+    class Meta:
+        model = dict
+
+    username = "testuser"
+    email = "test@example.com"
+
+@pytest.fixture
+def user_factory():
+    """User factory fixture."""
+    return UserFactory
+"#;
+
+    let plugin_path =
+        PathBuf::from("/tmp/venv/lib/python3.11/site-packages/pytest_factoryboy/fixtures.py");
+    db.analyze_file(plugin_path, plugin_content);
+
+    assert!(db.definitions.get("user_factory").is_some());
+}
+
+#[test]
+fn test_pytest_freezegun_fixtures() {
+    let db = FixtureDatabase::new();
+
+    let plugin_content = r#"
+import pytest
+from freezegun import freeze_time
+
+@pytest.fixture
+def frozen_time():
+    """Frozen time fixture."""
+    with freeze_time("2024-01-01"):
+        yield
+"#;
+
+    let plugin_path =
+        PathBuf::from("/tmp/venv/lib/python3.11/site-packages/pytest_freezegun/fixtures.py");
+    db.analyze_file(plugin_path, plugin_content);
+
+    assert!(db.definitions.get("frozen_time").is_some());
+}
+
+#[test]
+fn test_pytest_celery_fixtures() {
+    let db = FixtureDatabase::new();
+
+    let plugin_content = r#"
+import pytest
+
+@pytest.fixture(scope="session")
+def celery_config():
+    """Celery configuration fixture."""
+    return {"broker_url": "redis://localhost:6379"}
+
+@pytest.fixture
+def celery_app(celery_config):
+    """Celery application fixture."""
+    from celery import Celery
+    return Celery("test_app", **celery_config)
+
+@pytest.fixture
+def celery_worker(celery_app):
+    """Celery worker fixture."""
+    return celery_app.Worker()
+"#;
+
+    let plugin_path =
+        PathBuf::from("/tmp/venv/lib/python3.11/site-packages/pytest_celery/fixtures.py");
+    db.analyze_file(plugin_path, plugin_content);
+
+    assert!(db.definitions.get("celery_config").is_some());
+    assert!(db.definitions.get("celery_app").is_some());
+    assert!(db.definitions.get("celery_worker").is_some());
+}
+
+#[test]
+fn test_pytest_aiohttp_fixtures() {
+    let db = FixtureDatabase::new();
+
+    let plugin_content = r#"
+import pytest
+
+@pytest.fixture
+async def aiohttp_client():
+    """Aiohttp client fixture."""
+    import aiohttp
+    async with aiohttp.ClientSession() as session:
+        yield session
+
+@pytest.fixture
+async def aiohttp_server():
+    """Aiohttp server fixture."""
+    from aiohttp import web
+    app = web.Application()
+    return app
+"#;
+
+    let plugin_path =
+        PathBuf::from("/tmp/venv/lib/python3.11/site-packages/pytest_aiohttp/fixtures.py");
+    db.analyze_file(plugin_path, plugin_content);
+
+    assert!(db.definitions.get("aiohttp_client").is_some());
+    assert!(db.definitions.get("aiohttp_server").is_some());
+}
+
+#[test]
+fn test_pytest_benchmark_fixtures() {
+    let db = FixtureDatabase::new();
+
+    let plugin_content = r#"
+import pytest
+
+@pytest.fixture
+def benchmark():
+    """Benchmark fixture."""
+    class Benchmark:
+        def __call__(self, func):
+            return func()
+    return Benchmark()
+"#;
+
+    let plugin_path =
+        PathBuf::from("/tmp/venv/lib/python3.11/site-packages/pytest_benchmark/fixtures.py");
+    db.analyze_file(plugin_path, plugin_content);
+
+    assert!(db.definitions.get("benchmark").is_some());
+}
+
+#[test]
+fn test_pytest_playwright_fixtures() {
+    let db = FixtureDatabase::new();
+
+    let plugin_content = r#"
+import pytest
+
+@pytest.fixture(scope="session")
+def browser():
+    """Playwright browser fixture."""
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        yield p.chromium.launch()
+
+@pytest.fixture
+def page(browser):
+    """Playwright page fixture."""
+    page = browser.new_page()
+    yield page
+    page.close()
+
+@pytest.fixture
+def context(browser):
+    """Playwright browser context fixture."""
+    context = browser.new_context()
+    yield context
+    context.close()
+"#;
+
+    let plugin_path =
+        PathBuf::from("/tmp/venv/lib/python3.11/site-packages/pytest_playwright/fixtures.py");
+    db.analyze_file(plugin_path, plugin_content);
+
+    assert!(db.definitions.get("browser").is_some());
+    assert!(db.definitions.get("page").is_some());
+    assert!(db.definitions.get("context").is_some());
+}
