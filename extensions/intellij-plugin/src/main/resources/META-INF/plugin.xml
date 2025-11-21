@@ -61,6 +61,6 @@
 
     <!-- Startup activity for logging and diagnostics -->
     <extensions defaultExtensionNs="com.intellij">
-        <postStartupActivity implementation="com.github.bellini666.pytestlsp.PytestLanguageServerListener"/>
+        <projectActivity implementation="com.github.bellini666.pytestlsp.PytestLanguageServerListener"/>
     </extensions>
 </idea-plugin>
