@@ -4100,3 +4100,430 @@ def tuple_fixture() -> Tuple[str, int, bool]:
     assert!(db.definitions.contains_key("dict_fixture"));
     assert!(db.definitions.contains_key("tuple_fixture"));
 }
+
+// ============================================================================
+// MEDIUM PRIORITY TESTS: Complex hierarchy scenarios
+// ============================================================================
+
+#[test]
+fn test_five_level_override_chain() {
+    let db = FixtureDatabase::new();
+
+    // Create 5-level deep hierarchy
+    let root_conftest = r#"
+import pytest
+
+@pytest.fixture
+def deep_fixture():
+    return "root"
+"#;
+    db.analyze_file(PathBuf::from("/tmp/project/conftest.py"), root_conftest);
+
+    let level2_conftest = r#"
+import pytest
+
+@pytest.fixture
+def deep_fixture(deep_fixture):
+    return f"{deep_fixture}_level2"
+"#;
+    db.analyze_file(
+        PathBuf::from("/tmp/project/level2/conftest.py"),
+        level2_conftest,
+    );
+
+    let level3_conftest = r#"
+import pytest
+
+@pytest.fixture
+def deep_fixture(deep_fixture):
+    return f"{deep_fixture}_level3"
+"#;
+    db.analyze_file(
+        PathBuf::from("/tmp/project/level2/level3/conftest.py"),
+        level3_conftest,
+    );
+
+    let level4_conftest = r#"
+import pytest
+
+@pytest.fixture
+def deep_fixture(deep_fixture):
+    return f"{deep_fixture}_level4"
+"#;
+    db.analyze_file(
+        PathBuf::from("/tmp/project/level2/level3/level4/conftest.py"),
+        level4_conftest,
+    );
+
+    let level5_conftest = r#"
+import pytest
+
+@pytest.fixture
+def deep_fixture(deep_fixture):
+    return f"{deep_fixture}_level5"
+"#;
+    db.analyze_file(
+        PathBuf::from("/tmp/project/level2/level3/level4/level5/conftest.py"),
+        level5_conftest,
+    );
+
+    // Test file at deepest level
+    let test_content = r#"
+def test_deep(deep_fixture):
+    assert "level5" in deep_fixture
+"#;
+    let test_path = PathBuf::from("/tmp/project/level2/level3/level4/level5/test_deep.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Should find the closest (level5) fixture
+    let definition = db.find_fixture_definition(&test_path, 1, 15);
+    assert!(definition.is_some());
+    assert!(definition
+        .unwrap()
+        .file_path
+        .ends_with("level5/conftest.py"));
+}
+
+#[test]
+fn test_diamond_dependency_pattern() {
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def base_fixture():
+    return "base"
+
+@pytest.fixture
+def branch_a(base_fixture):
+    return f"{base_fixture}_a"
+
+@pytest.fixture
+def branch_b(base_fixture):
+    return f"{base_fixture}_b"
+
+@pytest.fixture
+def diamond(branch_a, branch_b):
+    return f"{branch_a}_{branch_b}"
+"#;
+    let conftest_path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    // Verify all fixtures detected
+    assert!(db.definitions.contains_key("base_fixture"));
+    assert!(db.definitions.contains_key("branch_a"));
+    assert!(db.definitions.contains_key("branch_b"));
+    assert!(db.definitions.contains_key("diamond"));
+
+    // Verify dependencies
+    let usages = db.usages.get(&conftest_path).unwrap();
+    assert!(usages.iter().any(|u| u.name == "base_fixture"));
+    assert!(usages.iter().any(|u| u.name == "branch_a"));
+    assert!(usages.iter().any(|u| u.name == "branch_b"));
+}
+
+#[test]
+fn test_ten_level_directory_depth() {
+    let db = FixtureDatabase::new();
+
+    // Create fixture at root
+    let root_conftest = r#"
+import pytest
+
+@pytest.fixture
+def deep_search():
+    return "found"
+"#;
+    db.analyze_file(PathBuf::from("/tmp/root/conftest.py"), root_conftest);
+
+    // Test file 10 levels deep
+    let test_content = r#"
+def test_deep_search(deep_search):
+    assert deep_search == "found"
+"#;
+    let deep_path = PathBuf::from("/tmp/root/a/b/c/d/e/f/g/h/i/j/test_deep.py");
+    db.analyze_file(deep_path.clone(), test_content);
+
+    // Should find fixture from root despite 10-level depth
+    let definition = db.find_fixture_definition(&deep_path, 1, 22);
+    assert!(definition.is_some(), "Should find fixture 10 levels up");
+    assert_eq!(definition.unwrap().name, "deep_search");
+}
+
+#[test]
+fn test_fixture_chain_middle_doesnt_use_parent() {
+    let db = FixtureDatabase::new();
+
+    let root_conftest = r#"
+import pytest
+
+@pytest.fixture
+def chain_fixture():
+    return "root"
+"#;
+    db.analyze_file(PathBuf::from("/tmp/test/conftest.py"), root_conftest);
+
+    let middle_conftest = r#"
+import pytest
+
+@pytest.fixture
+def chain_fixture():
+    # Middle fixture doesn't use parent - breaks chain
+    return "middle_independent"
+"#;
+    db.analyze_file(
+        PathBuf::from("/tmp/test/subdir/conftest.py"),
+        middle_conftest,
+    );
+
+    let leaf_conftest = r#"
+import pytest
+
+@pytest.fixture
+def chain_fixture(chain_fixture):
+    # Leaf uses parent (middle), but middle doesn't use root
+    return f"{chain_fixture}_leaf"
+"#;
+    db.analyze_file(
+        PathBuf::from("/tmp/test/subdir/deep/conftest.py"),
+        leaf_conftest,
+    );
+
+    // Test at leaf level
+    let test_content = r#"
+def test_chain(chain_fixture):
+    assert "leaf" in chain_fixture
+"#;
+    let test_path = PathBuf::from("/tmp/test/subdir/deep/test_chain.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Should find leaf fixture
+    let definition = db.find_fixture_definition(&test_path, 1, 16);
+    assert!(definition.is_some());
+    let def = definition.unwrap();
+    assert!(def.file_path.ends_with("deep/conftest.py"));
+}
+
+#[test]
+fn test_multiple_fixtures_same_name_in_file() {
+    let db = FixtureDatabase::new();
+
+    // Having multiple fixtures with same name in one file is unusual
+    // but pytest allows it - last one wins
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def duplicate_fixture():
+    return "first"
+
+@pytest.fixture
+def duplicate_fixture():
+    return "second"
+
+@pytest.fixture
+def duplicate_fixture():
+    return "third"
+"#;
+    let file_path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(file_path.clone(), content);
+
+    // Should detect all three definitions
+    let defs = db.definitions.get("duplicate_fixture").unwrap();
+    assert_eq!(defs.len(), 3, "Should store all duplicate definitions");
+
+    // When resolving from same file, should get the last one
+    let test_content = r#"
+def test_duplicate(duplicate_fixture):
+    assert duplicate_fixture == "third"
+"#;
+    let test_path = PathBuf::from("/tmp/test/test_dup.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    let definition = db.find_fixture_definition(&test_path, 1, 20);
+    assert!(definition.is_some());
+    // Should resolve to last definition (highest line number)
+    let def = definition.unwrap();
+    assert!(def.line > 8); // Third fixture is after line 8
+}
+
+#[test]
+fn test_sibling_directories_with_same_fixture() {
+    let db = FixtureDatabase::new();
+
+    let dir_a_conftest = r#"
+import pytest
+
+@pytest.fixture
+def sibling_fixture():
+    return "from_a"
+"#;
+    db.analyze_file(
+        PathBuf::from("/tmp/project/dir_a/conftest.py"),
+        dir_a_conftest,
+    );
+
+    let dir_b_conftest = r#"
+import pytest
+
+@pytest.fixture
+def sibling_fixture():
+    return "from_b"
+"#;
+    db.analyze_file(
+        PathBuf::from("/tmp/project/dir_b/conftest.py"),
+        dir_b_conftest,
+    );
+
+    // Test in dir_a should use dir_a's fixture
+    let test_a_content = r#"
+def test_a(sibling_fixture):
+    assert sibling_fixture == "from_a"
+"#;
+    let test_a_path = PathBuf::from("/tmp/project/dir_a/test_a.py");
+    db.analyze_file(test_a_path.clone(), test_a_content);
+
+    let def_a = db.find_fixture_definition(&test_a_path, 1, 12);
+    assert!(def_a.is_some());
+    assert!(def_a.unwrap().file_path.to_str().unwrap().contains("dir_a"));
+
+    // Test in dir_b should use dir_b's fixture
+    let test_b_content = r#"
+def test_b(sibling_fixture):
+    assert sibling_fixture == "from_b"
+"#;
+    let test_b_path = PathBuf::from("/tmp/project/dir_b/test_b.py");
+    db.analyze_file(test_b_path.clone(), test_b_content);
+
+    let def_b = db.find_fixture_definition(&test_b_path, 1, 12);
+    assert!(def_b.is_some());
+    assert!(def_b.unwrap().file_path.to_str().unwrap().contains("dir_b"));
+}
+
+#[test]
+fn test_fixture_with_six_level_parameter_chain() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def level1():
+    return 1
+
+@pytest.fixture
+def level2(level1):
+    return level1 + 1
+
+@pytest.fixture
+def level3(level2):
+    return level2 + 1
+
+@pytest.fixture
+def level4(level3):
+    return level3 + 1
+
+@pytest.fixture
+def level5(level4):
+    return level4 + 1
+
+@pytest.fixture
+def level6(level5):
+    return level5 + 1
+"#;
+    let conftest_path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(conftest_path.clone(), content);
+
+    // All fixtures should be detected
+    for i in 1..=6 {
+        let name = format!("level{}", i);
+        assert!(db.definitions.contains_key(&name), "Should detect {}", name);
+    }
+
+    // Check dependency chain
+    let usages = db.usages.get(&conftest_path).unwrap();
+    assert!(usages.iter().any(|u| u.name == "level1"));
+    assert!(usages.iter().any(|u| u.name == "level2"));
+    assert!(usages.iter().any(|u| u.name == "level3"));
+    assert!(usages.iter().any(|u| u.name == "level4"));
+    assert!(usages.iter().any(|u| u.name == "level5"));
+}
+
+#[test]
+fn test_circular_dependency_detection() {
+    let db = FixtureDatabase::new();
+
+    // Note: This creates circular dependencies which pytest would reject at runtime
+    // The parser should still detect the fixtures and dependencies
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def fixture_a(fixture_b):
+    return f"a_{fixture_b}"
+
+@pytest.fixture
+def fixture_b(fixture_a):
+    return f"b_{fixture_a}"
+"#;
+    let conftest_path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(conftest_path.clone(), content);
+
+    // Both fixtures should be detected despite circular dependency
+    assert!(db.definitions.contains_key("fixture_a"));
+    assert!(db.definitions.contains_key("fixture_b"));
+
+    // Both dependencies should be recorded
+    let usages = db.usages.get(&conftest_path).unwrap();
+    assert!(usages.iter().any(|u| u.name == "fixture_a"));
+    assert!(usages.iter().any(|u| u.name == "fixture_b"));
+
+    // Note: Runtime detection of circular dependencies is pytest's responsibility
+    println!("Circular dependencies detected but not validated (pytest's job)");
+}
+
+#[test]
+fn test_multiple_third_party_same_fixture_name() {
+    let db = FixtureDatabase::new();
+
+    // Simulate two different plugins defining same fixture
+    let plugin1_content = r#"
+import pytest
+
+@pytest.fixture
+def event_loop():
+    return "from_plugin1"
+"#;
+    db.analyze_file(
+        PathBuf::from("/tmp/.venv/lib/python3.11/site-packages/plugin1/fixtures.py"),
+        plugin1_content,
+    );
+
+    let plugin2_content = r#"
+import pytest
+
+@pytest.fixture
+def event_loop():
+    return "from_plugin2"
+"#;
+    db.analyze_file(
+        PathBuf::from("/tmp/.venv/lib/python3.11/site-packages/plugin2/fixtures.py"),
+        plugin2_content,
+    );
+
+    // Both should be detected
+    let defs = db.definitions.get("event_loop").unwrap();
+    assert_eq!(defs.len(), 2, "Should detect both third-party fixtures");
+
+    // Resolution should be deterministic (sorted by path)
+    let test_content = r#"
+def test_event_loop(event_loop):
+    pass
+"#;
+    let test_path = PathBuf::from("/tmp/project/test_async.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    let definition = db.find_fixture_definition(&test_path, 1, 21);
+    assert!(definition.is_some(), "Should resolve to one of the plugins");
+}
