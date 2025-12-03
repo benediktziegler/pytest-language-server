@@ -537,6 +537,14 @@ impl FixtureDatabase {
             self.visit_assignment_fixture(assign, file_path, content, line_index);
         }
 
+        // Handle class definitions - recurse into class body to find test methods
+        if let Stmt::ClassDef(class_def) = stmt {
+            for class_stmt in &class_def.body {
+                self.visit_stmt(class_stmt, file_path, _is_conftest, content, line_index);
+            }
+            return;
+        }
+
         // Handle both regular and async function definitions
         let (func_name, decorator_list, args, range, body, returns) = match stmt {
             Stmt::FunctionDef(func_def) => (

@@ -560,3 +560,109 @@ fn test_e2e_cli_fixtures_list_with_renamed() {
         "Should not show internal function name"
     );
 }
+
+// MARK: - Class-based Tests E2E Tests (issue #19)
+
+#[test]
+fn test_e2e_class_based_tests_fixture_usage() {
+    // Test case from https://github.com/bellini666/pytest-language-server/issues/19
+    let db = FixtureDatabase::new();
+    let project_path = PathBuf::from("tests/test_project");
+
+    db.scan_workspace(&project_path);
+
+    // Fixtures defined in test_class_based.py should be found
+    assert!(
+        db.definitions.contains_key("shared_fixture"),
+        "Should find shared_fixture"
+    );
+    assert!(
+        db.definitions.contains_key("another_fixture"),
+        "Should find another_fixture"
+    );
+
+    // Get the test file and check usages
+    let test_file = project_path
+        .join("test_class_based.py")
+        .canonicalize()
+        .unwrap();
+
+    let usages = db.usages.get(&test_file);
+    assert!(
+        usages.is_some(),
+        "Should have usages in test_class_based.py"
+    );
+
+    let usages = usages.unwrap();
+
+    // Count usages of shared_fixture (should be used by multiple test methods in classes)
+    let shared_usages: Vec<_> = usages
+        .iter()
+        .filter(|u| u.name == "shared_fixture")
+        .collect();
+    assert!(
+        shared_usages.len() >= 4,
+        "shared_fixture should be used at least 4 times (by test methods in classes), got {}",
+        shared_usages.len()
+    );
+
+    // Count usages of another_fixture
+    let another_usages: Vec<_> = usages
+        .iter()
+        .filter(|u| u.name == "another_fixture")
+        .collect();
+    assert!(
+        another_usages.len() >= 2,
+        "another_fixture should be used at least 2 times, got {}",
+        another_usages.len()
+    );
+}
+
+#[test]
+fn test_e2e_class_based_fixture_references() {
+    let db = FixtureDatabase::new();
+    let project_path = PathBuf::from("tests/test_project");
+
+    db.scan_workspace(&project_path);
+
+    // Get the shared_fixture definition
+    let shared_defs = db.definitions.get("shared_fixture");
+    assert!(shared_defs.is_some());
+
+    let def = &shared_defs.unwrap()[0];
+    let refs = db.find_references_for_definition(def);
+
+    // Should have references from test methods in classes
+    assert!(
+        refs.len() >= 4,
+        "shared_fixture should have at least 4 references from class test methods, got {}",
+        refs.len()
+    );
+}
+
+#[test]
+fn test_e2e_cli_class_based_fixtures_shown_as_used() {
+    // Run CLI and verify fixtures used by class-based tests are marked as used
+    let mut cmd = Command::cargo_bin("pytest-language-server").unwrap();
+    let output = cmd
+        .arg("fixtures")
+        .arg("list")
+        .arg("tests/test_project")
+        .output()
+        .expect("Failed to execute command");
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // shared_fixture and another_fixture should be shown as used (not "unused")
+    // They are used by test methods inside TestClassBased and TestNestedClasses
+    assert!(
+        stdout.contains("shared_fixture") && !stdout.contains("shared_fixture (unused)"),
+        "shared_fixture should be marked as used"
+    );
+    assert!(
+        stdout.contains("another_fixture") && !stdout.contains("another_fixture (unused)"),
+        "another_fixture should be marked as used"
+    );
+}

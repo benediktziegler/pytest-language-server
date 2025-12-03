@@ -3223,6 +3223,110 @@ def test_example(new: int):
 }
 
 #[test]
+fn test_class_based_test_methods_use_fixtures() {
+    // Test case from https://github.com/bellini666/pytest-language-server/issues/19
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture() -> int:
+    return 1
+
+class TestInClass:
+    def test_in_class(self, my_fixture: int):
+        assert my_fixture == 1
+
+    def test_another(self, my_fixture: int):
+        assert my_fixture == 1
+"#;
+    let file_path = PathBuf::from("/tmp/test/test_class.py");
+    db.analyze_file(file_path.clone(), content);
+
+    // The fixture should be detected
+    assert!(db.definitions.contains_key("my_fixture"));
+
+    // The test methods inside the class should register fixture usages
+    let usages = db.usages.get(&file_path).unwrap();
+    let my_fixture_usages: Vec<_> = usages.iter().filter(|u| u.name == "my_fixture").collect();
+
+    assert_eq!(
+        my_fixture_usages.len(),
+        2,
+        "Should have 2 usages of my_fixture from test methods in class"
+    );
+}
+
+#[test]
+fn test_nested_class_test_methods() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def outer_fixture():
+    return "outer"
+
+class TestOuter:
+    def test_outer(self, outer_fixture):
+        pass
+
+    class TestNested:
+        def test_nested(self, outer_fixture):
+            pass
+"#;
+    let file_path = PathBuf::from("/tmp/test/test_nested.py");
+    db.analyze_file(file_path.clone(), content);
+
+    // Both outer and nested test methods should find the fixture
+    let usages = db.usages.get(&file_path).unwrap();
+    let fixture_usages: Vec<_> = usages
+        .iter()
+        .filter(|u| u.name == "outer_fixture")
+        .collect();
+
+    assert_eq!(
+        fixture_usages.len(),
+        2,
+        "Should have 2 usages from both outer and nested test classes"
+    );
+}
+
+#[test]
+fn test_fixture_defined_in_class() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+class TestWithFixture:
+    @pytest.fixture
+    def class_fixture(self):
+        return "class_value"
+
+    def test_uses_class_fixture(self, class_fixture):
+        assert class_fixture == "class_value"
+"#;
+    let file_path = PathBuf::from("/tmp/test/test_class_fixture.py");
+    db.analyze_file(file_path.clone(), content);
+
+    // Fixture defined inside class should be detected
+    assert!(
+        db.definitions.contains_key("class_fixture"),
+        "Class-defined fixture should be detected"
+    );
+
+    // Test method should register usage
+    let usages = db.usages.get(&file_path).unwrap();
+    assert!(
+        usages.iter().any(|u| u.name == "class_fixture"),
+        "Usage of class fixture should be detected"
+    );
+}
+
+#[test]
 fn test_pytest_django_builtin_fixtures() {
     let db = FixtureDatabase::new();
 
