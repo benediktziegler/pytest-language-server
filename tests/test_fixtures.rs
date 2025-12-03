@@ -6283,3 +6283,339 @@ def context(browser):
     assert!(db.definitions.get("page").is_some());
     assert!(db.definitions.get("context").is_some());
 }
+
+// =============================================================================
+// Tests for keyword-only and positional-only fixture arguments
+// =============================================================================
+
+#[test]
+fn test_keyword_only_fixture_usage_in_test() {
+    let db = FixtureDatabase::new();
+
+    // Add a fixture in conftest
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return 42
+"#;
+    let conftest_path = PathBuf::from("/tmp/conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    // Add a test that uses keyword-only argument (after *)
+    let test_content = r#"
+def test_with_kwonly(*, my_fixture):
+    assert my_fixture == 42
+"#;
+    let test_path = PathBuf::from("/tmp/test_kwonly.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Check that the fixture usage was detected
+    let usages = db.usages.get(&test_path);
+    assert!(usages.is_some(), "Usages should be detected");
+    let usages = usages.unwrap();
+    assert!(
+        usages.iter().any(|u| u.name == "my_fixture"),
+        "Should detect my_fixture usage in keyword-only argument"
+    );
+
+    // Check that no undeclared fixtures were detected (the fixture is properly declared)
+    let undeclared = db.get_undeclared_fixtures(&test_path);
+    assert_eq!(
+        undeclared.len(),
+        0,
+        "Should not detect any undeclared fixtures for keyword-only arg"
+    );
+}
+
+#[test]
+fn test_keyword_only_fixture_usage_with_type_annotation() {
+    let db = FixtureDatabase::new();
+
+    // Add a fixture in conftest
+    let conftest_content = r#"
+import pytest
+from pathlib import Path
+
+@pytest.fixture
+def tmp_path():
+    return Path("/tmp")
+"#;
+    let conftest_path = PathBuf::from("/tmp/conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    // Add a test that uses keyword-only argument with type annotation (like in the issue)
+    let test_content = r#"
+from pathlib import Path
+
+def test_run_command(*, tmp_path: Path) -> None:
+    """Test that uses a keyword-only fixture with type annotation."""
+    rst_file = tmp_path / "example.rst"
+    assert rst_file.parent == tmp_path
+"#;
+    let test_path = PathBuf::from("/tmp/test_kwonly_typed.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Check that the fixture usage was detected
+    let usages = db.usages.get(&test_path);
+    assert!(usages.is_some(), "Usages should be detected");
+    let usages = usages.unwrap();
+    assert!(
+        usages.iter().any(|u| u.name == "tmp_path"),
+        "Should detect tmp_path usage in keyword-only argument"
+    );
+
+    // Check that no undeclared fixtures were detected
+    let undeclared = db.get_undeclared_fixtures(&test_path);
+    assert_eq!(
+        undeclared.len(),
+        0,
+        "Should not detect any undeclared fixtures for keyword-only arg with type annotation"
+    );
+}
+
+#[test]
+fn test_positional_only_fixture_usage() {
+    let db = FixtureDatabase::new();
+
+    // Add a fixture in conftest
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return 42
+"#;
+    let conftest_path = PathBuf::from("/tmp/conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    // Add a test that uses positional-only argument (before /)
+    let test_content = r#"
+def test_with_posonly(my_fixture, /):
+    assert my_fixture == 42
+"#;
+    let test_path = PathBuf::from("/tmp/test_posonly.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Check that the fixture usage was detected
+    let usages = db.usages.get(&test_path);
+    assert!(usages.is_some(), "Usages should be detected");
+    let usages = usages.unwrap();
+    assert!(
+        usages.iter().any(|u| u.name == "my_fixture"),
+        "Should detect my_fixture usage in positional-only argument"
+    );
+
+    // Check that no undeclared fixtures were detected
+    let undeclared = db.get_undeclared_fixtures(&test_path);
+    assert_eq!(
+        undeclared.len(),
+        0,
+        "Should not detect any undeclared fixtures for positional-only arg"
+    );
+}
+
+#[test]
+fn test_mixed_argument_types_fixture_usage() {
+    let db = FixtureDatabase::new();
+
+    // Add fixtures in conftest
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def fixture_a():
+    return "a"
+
+@pytest.fixture
+def fixture_b():
+    return "b"
+
+@pytest.fixture
+def fixture_c():
+    return "c"
+"#;
+    let conftest_path = PathBuf::from("/tmp/conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    // Add a test that uses all argument types: positional-only, regular, and keyword-only
+    let test_content = r#"
+def test_with_all_types(fixture_a, /, fixture_b, *, fixture_c):
+    assert fixture_a == "a"
+    assert fixture_b == "b"
+    assert fixture_c == "c"
+"#;
+    let test_path = PathBuf::from("/tmp/test_mixed.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Check that all fixture usages were detected
+    let usages = db.usages.get(&test_path);
+    assert!(usages.is_some(), "Usages should be detected");
+    let usages = usages.unwrap();
+    assert!(
+        usages.iter().any(|u| u.name == "fixture_a"),
+        "Should detect fixture_a usage in positional-only argument"
+    );
+    assert!(
+        usages.iter().any(|u| u.name == "fixture_b"),
+        "Should detect fixture_b usage in regular argument"
+    );
+    assert!(
+        usages.iter().any(|u| u.name == "fixture_c"),
+        "Should detect fixture_c usage in keyword-only argument"
+    );
+
+    // Check that no undeclared fixtures were detected
+    let undeclared = db.get_undeclared_fixtures(&test_path);
+    assert_eq!(
+        undeclared.len(),
+        0,
+        "Should not detect any undeclared fixtures for mixed argument types"
+    );
+}
+
+#[test]
+fn test_keyword_only_fixture_in_fixture_definition() {
+    let db = FixtureDatabase::new();
+
+    // Add fixtures in conftest - one depends on another via keyword-only arg
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def base_fixture():
+    return 42
+
+@pytest.fixture
+def dependent_fixture(*, base_fixture):
+    return base_fixture * 2
+"#;
+    let conftest_path = PathBuf::from("/tmp/conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    // Check that both fixtures were detected
+    assert!(
+        db.definitions.contains_key("base_fixture"),
+        "base_fixture should be detected"
+    );
+    assert!(
+        db.definitions.contains_key("dependent_fixture"),
+        "dependent_fixture should be detected"
+    );
+
+    // Check that the usage of base_fixture in dependent_fixture was detected
+    let usages = db.usages.get(&conftest_path);
+    assert!(usages.is_some(), "Usages should be detected");
+    let usages = usages.unwrap();
+    assert!(
+        usages.iter().any(|u| u.name == "base_fixture"),
+        "Should detect base_fixture usage as keyword-only dependency in dependent_fixture"
+    );
+}
+
+#[test]
+fn test_keyword_only_with_multiple_fixtures() {
+    let db = FixtureDatabase::new();
+
+    // Add fixtures in conftest
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def fixture_x():
+    return "x"
+
+@pytest.fixture
+def fixture_y():
+    return "y"
+
+@pytest.fixture
+def fixture_z():
+    return "z"
+"#;
+    let conftest_path = PathBuf::from("/tmp/conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    // Add a test with multiple keyword-only fixtures
+    let test_content = r#"
+def test_multi_kwonly(*, fixture_x, fixture_y, fixture_z):
+    assert fixture_x == "x"
+    assert fixture_y == "y"
+    assert fixture_z == "z"
+"#;
+    let test_path = PathBuf::from("/tmp/test_multi_kwonly.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Check that all fixture usages were detected
+    let usages = db.usages.get(&test_path);
+    assert!(usages.is_some(), "Usages should be detected");
+    let usages = usages.unwrap();
+    assert!(
+        usages.iter().any(|u| u.name == "fixture_x"),
+        "Should detect fixture_x usage"
+    );
+    assert!(
+        usages.iter().any(|u| u.name == "fixture_y"),
+        "Should detect fixture_y usage"
+    );
+    assert!(
+        usages.iter().any(|u| u.name == "fixture_z"),
+        "Should detect fixture_z usage"
+    );
+
+    // Check that no undeclared fixtures were detected
+    let undeclared = db.get_undeclared_fixtures(&test_path);
+    assert_eq!(
+        undeclared.len(),
+        0,
+        "Should not detect any undeclared fixtures"
+    );
+}
+
+#[test]
+fn test_go_to_definition_for_keyword_only_fixture() {
+    let db = FixtureDatabase::new();
+
+    // Set up conftest.py with a fixture
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return 42
+"#;
+    let conftest_path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    // Set up a test file that uses the fixture as keyword-only
+    let test_content = r#"
+def test_something(*, my_fixture):
+    assert my_fixture == 42
+"#;
+    let test_path = PathBuf::from("/tmp/test/test_kwonly.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Verify fixture usage was detected
+    let usages = db.usages.get(&test_path);
+    assert!(usages.is_some(), "Usages should be detected");
+    let usages = usages.unwrap();
+    let fixture_usage = usages.iter().find(|u| u.name == "my_fixture");
+    assert!(
+        fixture_usage.is_some(),
+        "Should detect my_fixture usage in keyword-only position"
+    );
+
+    // Get the line and character position of the usage
+    let usage = fixture_usage.unwrap();
+
+    // Try to find the definition from the test file at the usage position
+    // usage.line is 1-based, but find_fixture_definition expects 0-based LSP coordinates
+    let definition =
+        db.find_fixture_definition(&test_path, (usage.line - 1) as u32, usage.start_char as u32);
+
+    assert!(definition.is_some(), "Definition should be found");
+    let def = definition.unwrap();
+    assert_eq!(def.name, "my_fixture");
+    assert_eq!(def.file_path, conftest_path);
+}

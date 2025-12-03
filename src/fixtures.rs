@@ -1,5 +1,5 @@
 use dashmap::DashMap;
-use rustpython_parser::ast::{Expr, Stmt};
+use rustpython_parser::ast::{ArgWithDefault, Arguments, Expr, Stmt};
 use rustpython_parser::{parse, Mode};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -626,7 +626,8 @@ impl FixtureDatabase {
             declared_params.insert("request".to_string());
             declared_params.insert(func_name.to_string()); // Exclude function name itself
 
-            for arg in &args.args {
+            // Iterate over all argument types: positional-only, regular, and keyword-only
+            for arg in Self::all_args(args) {
                 let arg_name = arg.def.arg.as_str();
                 declared_params.insert(arg_name.to_string());
 
@@ -688,7 +689,8 @@ impl FixtureDatabase {
             declared_params.insert("request".to_string()); // pytest built-in
 
             // Extract fixture usages from function parameters
-            for arg in &args.args {
+            // Iterate over all argument types: positional-only, regular, and keyword-only
+            for arg in Self::all_args(args) {
                 let arg_name = arg.def.arg.as_str();
                 declared_params.insert(arg_name.to_string());
 
@@ -786,6 +788,16 @@ impl FixtureDatabase {
                 }
             }
         }
+    }
+
+    /// Returns an iterator over all function arguments including positional-only,
+    /// regular positional, and keyword-only arguments.
+    /// This is needed because pytest fixtures can be declared as any of these types.
+    fn all_args(args: &Arguments) -> impl Iterator<Item = &ArgWithDefault> {
+        args.posonlyargs
+            .iter()
+            .chain(args.args.iter())
+            .chain(args.kwonlyargs.iter())
     }
 
     fn is_fixture_decorator(expr: &Expr) -> bool {

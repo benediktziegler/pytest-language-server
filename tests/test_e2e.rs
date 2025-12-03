@@ -666,3 +666,113 @@ fn test_e2e_cli_class_based_fixtures_shown_as_used() {
         "another_fixture should be marked as used"
     );
 }
+
+// MARK: Keyword-only and Positional-only Fixtures E2E Tests
+
+#[test]
+fn test_e2e_keyword_only_fixture_detection() {
+    // Test that fixtures used as keyword-only arguments are properly detected
+    let db = FixtureDatabase::new();
+    let project_path = PathBuf::from("tests/test_project");
+    db.scan_workspace(&project_path);
+
+    // Get the test file path
+    let test_file = project_path
+        .join("test_kwonly_fixtures.py")
+        .canonicalize()
+        .unwrap();
+
+    // Check that usages were detected for keyword-only fixtures
+    let usages = db.usages.get(&test_file);
+    assert!(
+        usages.is_some(),
+        "Usages should be detected for test_kwonly_fixtures.py"
+    );
+
+    let usages = usages.unwrap();
+
+    // Verify sample_fixture usage (used in keyword-only and positional-only tests)
+    assert!(
+        usages.iter().any(|u| u.name == "sample_fixture"),
+        "sample_fixture should be detected as used"
+    );
+
+    // Verify another_fixture usage (used in keyword-only tests)
+    assert!(
+        usages.iter().any(|u| u.name == "another_fixture"),
+        "another_fixture should be detected as used"
+    );
+
+    // Verify shared_resource usage (used in keyword-only tests)
+    assert!(
+        usages.iter().any(|u| u.name == "shared_resource"),
+        "shared_resource should be detected as used"
+    );
+}
+
+#[test]
+fn test_e2e_keyword_only_no_undeclared_fixtures() {
+    // Verify that keyword-only fixtures are not flagged as undeclared
+    let db = FixtureDatabase::new();
+    let project_path = PathBuf::from("tests/test_project");
+    db.scan_workspace(&project_path);
+
+    // Get the test file path
+    let test_file = project_path
+        .join("test_kwonly_fixtures.py")
+        .canonicalize()
+        .unwrap();
+
+    // There should be no undeclared fixtures in this file
+    let undeclared = db.get_undeclared_fixtures(&test_file);
+    assert_eq!(
+        undeclared.len(),
+        0,
+        "Keyword-only fixtures should not be flagged as undeclared. Found: {:?}",
+        undeclared.iter().map(|u| &u.name).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_e2e_keyword_only_go_to_definition() {
+    // Test that go-to-definition works for keyword-only fixtures
+    let db = FixtureDatabase::new();
+    let project_path = PathBuf::from("tests/test_project");
+    db.scan_workspace(&project_path);
+
+    let test_file = project_path
+        .join("test_kwonly_fixtures.py")
+        .canonicalize()
+        .unwrap();
+    let conftest_file = project_path.join("conftest.py").canonicalize().unwrap();
+
+    // Get the usages for the test file
+    let usages = db.usages.get(&test_file);
+    assert!(usages.is_some());
+
+    let usages = usages.unwrap();
+
+    // Find the sample_fixture usage
+    let sample_usage = usages.iter().find(|u| u.name == "sample_fixture");
+    assert!(
+        sample_usage.is_some(),
+        "sample_fixture usage should be found"
+    );
+    let sample_usage = sample_usage.unwrap();
+
+    // Try to find the definition using the usage position
+    // usage.line is 1-based, but find_fixture_definition expects 0-based LSP coordinates
+    let definition = db.find_fixture_definition(
+        &test_file,
+        (sample_usage.line - 1) as u32,
+        sample_usage.start_char as u32,
+    );
+
+    assert!(
+        definition.is_some(),
+        "Definition should be found for keyword-only fixture"
+    );
+    let def = definition.unwrap();
+    assert_eq!(def.name, "sample_fixture");
+    assert_eq!(def.file_path, conftest_file);
+}
