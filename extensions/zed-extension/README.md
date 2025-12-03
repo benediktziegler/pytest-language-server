@@ -40,6 +40,20 @@ This means you can either:
 
 ## Configuration
 
+After installing the extension, you need to enable the language server for Python files. Add the following to your Zed `settings.json`:
+
+```json
+{
+  "languages": {
+    "Python": {
+      "language_servers": ["pyright", "pytest-language-server", "..."]
+    }
+  }
+}
+```
+
+> **Note**: The `"..."` entry preserves any other language servers you may have configured. You can also use `"!pyright"` to disable pyright if you prefer a different Python LSP.
+
 ### Tips
 
 - **Custom Binary**: If you have `pytest-language-server` in your PATH, the extension will prioritize that over the auto-downloaded binary
