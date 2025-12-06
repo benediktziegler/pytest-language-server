@@ -3,6 +3,7 @@
 //! This module contains all the logic for parsing Python files and extracting
 //! fixture definitions, usages, and undeclared fixtures.
 
+use super::decorators;
 use super::types::{FixtureDefinition, FixtureUsage, UndeclaredFixture};
 use super::FixtureDatabase;
 use rustpython_parser::ast::{ArgWithDefault, Arguments, Expr, Stmt};
@@ -54,6 +55,10 @@ impl FixtureDatabase {
         // Clear previous imports for this file
         self.imports.remove(&file_path);
 
+        // Note: line_index_cache uses content-hash-based invalidation,
+        // so we don't need to clear it here - get_line_index will detect
+        // if the content has changed and rebuild if necessary.
+
         // Clear previous fixture definitions from this file (only when re-analyzing)
         // Skip this during initial workspace scan for performance
         if cleanup_previous {
@@ -67,8 +72,8 @@ impl FixtureDatabase {
             .unwrap_or(false);
         debug!("is_conftest: {}", is_conftest);
 
-        // Build line index for O(1) line lookups
-        let line_index = Self::build_line_index(content);
+        // Get or build line index for O(1) line lookups (cached for performance)
+        let line_index = self.get_line_index(&file_path, content);
 
         // Process each statement in the module
         if let rustpython_parser::ast::Mod::Module(module) = parsed {
@@ -171,6 +176,27 @@ impl FixtureDatabase {
             .chain(args.kwonlyargs.iter())
     }
 
+    /// Helper to record a fixture usage in the database.
+    /// Reduces code duplication across multiple call sites.
+    fn record_fixture_usage(
+        &self,
+        file_path: &Path,
+        fixture_name: String,
+        line: usize,
+        start_char: usize,
+        end_char: usize,
+    ) {
+        let file_path_buf = file_path.to_path_buf();
+        let usage = FixtureUsage {
+            name: fixture_name,
+            file_path: file_path_buf.clone(),
+            line,
+            start_char,
+            end_char,
+        };
+        self.usages.entry(file_path_buf).or_default().push(usage);
+    }
+
     /// Visit a statement and extract fixture definitions and usages
     fn visit_stmt(
         &self,
@@ -189,7 +215,7 @@ impl FixtureDatabase {
         if let Stmt::ClassDef(class_def) = stmt {
             // Check for @pytest.mark.usefixtures decorator on the class
             for decorator in &class_def.decorator_list {
-                let usefixtures = Self::extract_usefixtures_names(decorator);
+                let usefixtures = decorators::extract_usefixtures_names(decorator);
                 for (fixture_name, range) in usefixtures {
                     let usage_line =
                         self.get_line_from_offset(range.start().to_usize(), line_index);
@@ -203,18 +229,13 @@ impl FixtureDatabase {
                         fixture_name, file_path, usage_line, start_char
                     );
 
-                    let usage = FixtureUsage {
-                        name: fixture_name,
-                        file_path: file_path.clone(),
-                        line: usage_line,
-                        start_char: start_char + 1, // Skip opening quote
-                        end_char: end_char - 1,     // Skip closing quote
-                    };
-
-                    self.usages
-                        .entry(file_path.clone())
-                        .or_default()
-                        .push(usage);
+                    self.record_fixture_usage(
+                        file_path,
+                        fixture_name,
+                        usage_line,
+                        start_char + 1,
+                        end_char - 1,
+                    );
                 }
             }
 
@@ -249,7 +270,7 @@ impl FixtureDatabase {
 
         // Check for @pytest.mark.usefixtures decorator on the function
         for decorator in decorator_list {
-            let usefixtures = Self::extract_usefixtures_names(decorator);
+            let usefixtures = decorators::extract_usefixtures_names(decorator);
             for (fixture_name, range) in usefixtures {
                 let usage_line = self.get_line_from_offset(range.start().to_usize(), line_index);
                 let start_char =
@@ -262,24 +283,19 @@ impl FixtureDatabase {
                     fixture_name, file_path, usage_line, start_char
                 );
 
-                let usage = FixtureUsage {
-                    name: fixture_name,
-                    file_path: file_path.clone(),
-                    line: usage_line,
-                    start_char: start_char + 1, // Skip opening quote
-                    end_char: end_char - 1,     // Skip closing quote
-                };
-
-                self.usages
-                    .entry(file_path.clone())
-                    .or_default()
-                    .push(usage);
+                self.record_fixture_usage(
+                    file_path,
+                    fixture_name,
+                    usage_line,
+                    start_char + 1,
+                    end_char - 1,
+                );
             }
         }
 
         // Check for @pytest.mark.parametrize with indirect=True on the function
         for decorator in decorator_list {
-            let indirect_fixtures = Self::extract_parametrize_indirect_fixtures(decorator);
+            let indirect_fixtures = decorators::extract_parametrize_indirect_fixtures(decorator);
             for (fixture_name, range) in indirect_fixtures {
                 let usage_line = self.get_line_from_offset(range.start().to_usize(), line_index);
                 let start_char =
@@ -292,18 +308,13 @@ impl FixtureDatabase {
                     fixture_name, file_path, usage_line, start_char
                 );
 
-                let usage = FixtureUsage {
-                    name: fixture_name,
-                    file_path: file_path.clone(),
-                    line: usage_line,
-                    start_char: start_char + 1, // Skip opening quote
-                    end_char: end_char - 1,     // Skip closing quote
-                };
-
-                self.usages
-                    .entry(file_path.clone())
-                    .or_default()
-                    .push(usage);
+                self.record_fixture_usage(
+                    file_path,
+                    fixture_name,
+                    usage_line,
+                    start_char + 1,
+                    end_char - 1,
+                );
             }
         }
 
@@ -315,13 +326,13 @@ impl FixtureDatabase {
         );
         let fixture_decorator = decorator_list
             .iter()
-            .find(|dec| Self::is_fixture_decorator(dec));
+            .find(|dec| decorators::is_fixture_decorator(dec));
 
         if let Some(decorator) = fixture_decorator {
             debug!("  Decorator matched as fixture!");
 
             // Check if the fixture has a custom name
-            let fixture_name = Self::extract_fixture_name_from_decorator(decorator)
+            let fixture_name = decorators::extract_fixture_name_from_decorator(decorator)
                 .unwrap_or_else(|| func_name.to_string());
 
             let line = self.get_line_from_offset(range.start().to_usize(), line_index);
@@ -375,18 +386,13 @@ impl FixtureDatabase {
                         arg_name, file_path, arg_line, start_char
                     );
 
-                    let usage = FixtureUsage {
-                        name: arg_name.to_string(),
-                        file_path: file_path.clone(),
-                        line: arg_line,
+                    self.record_fixture_usage(
+                        file_path,
+                        arg_name.to_string(),
+                        arg_line,
                         start_char,
                         end_char,
-                    };
-
-                    self.usages
-                        .entry(file_path.clone())
-                        .or_default()
-                        .push(usage);
+                    );
                 }
             }
 
@@ -432,18 +438,13 @@ impl FixtureDatabase {
                         arg_name, file_path, arg_line, start_char
                     );
 
-                    let usage = FixtureUsage {
-                        name: arg_name.to_string(),
-                        file_path: file_path.clone(),
-                        line: arg_line,
+                    self.record_fixture_usage(
+                        file_path,
+                        arg_name.to_string(),
+                        arg_line,
                         start_char,
                         end_char,
-                    };
-
-                    self.usages
-                        .entry(file_path.clone())
-                        .or_default()
-                        .push(usage);
+                    );
                 }
             }
 
@@ -470,7 +471,7 @@ impl FixtureDatabase {
     ) {
         if let Expr::Call(outer_call) = &*assign.value {
             if let Expr::Call(inner_call) = &*outer_call.func {
-                if Self::is_fixture_decorator(&inner_call.func) {
+                if decorators::is_fixture_decorator(&inner_call.func) {
                     for target in &assign.targets {
                         if let Expr::Name(name) = target {
                             let fixture_name = name.id.as_str();
@@ -511,181 +512,6 @@ impl FixtureDatabase {
             }
         }
     }
-
-    // ============ Decorator checking methods ============
-
-    /// Check if an expression is a @pytest.fixture decorator
-    pub(crate) fn is_fixture_decorator(expr: &Expr) -> bool {
-        match expr {
-            Expr::Name(name) => name.id.as_str() == "fixture",
-            Expr::Attribute(attr) => {
-                if let Expr::Name(value) = &*attr.value {
-                    value.id.as_str() == "pytest" && attr.attr.as_str() == "fixture"
-                } else {
-                    false
-                }
-            }
-            Expr::Call(call) => Self::is_fixture_decorator(&call.func),
-            _ => false,
-        }
-    }
-
-    /// Extracts the fixture name from a decorator's `name=` argument if present.
-    fn extract_fixture_name_from_decorator(expr: &Expr) -> Option<String> {
-        let Expr::Call(call) = expr else { return None };
-        if !Self::is_fixture_decorator(&call.func) {
-            return None;
-        }
-
-        call.keywords
-            .iter()
-            .filter(|kw| kw.arg.as_ref().is_some_and(|a| a.as_str() == "name"))
-            .find_map(|kw| match &kw.value {
-                Expr::Constant(c) => match &c.value {
-                    rustpython_parser::ast::Constant::Str(s) => Some(s.to_string()),
-                    _ => None,
-                },
-                _ => None,
-            })
-    }
-
-    /// Checks if an expression is a pytest.mark.usefixtures decorator.
-    pub(crate) fn is_usefixtures_decorator(expr: &Expr) -> bool {
-        match expr {
-            Expr::Call(call) => Self::is_usefixtures_decorator(&call.func),
-            Expr::Attribute(attr) => {
-                if attr.attr.as_str() != "usefixtures" {
-                    return false;
-                }
-                match &*attr.value {
-                    Expr::Attribute(inner_attr) => {
-                        if inner_attr.attr.as_str() != "mark" {
-                            return false;
-                        }
-                        matches!(&*inner_attr.value, Expr::Name(name) if name.id.as_str() == "pytest")
-                    }
-                    Expr::Name(name) => name.id.as_str() == "mark",
-                    _ => false,
-                }
-            }
-            _ => false,
-        }
-    }
-
-    /// Extracts fixture names from @pytest.mark.usefixtures("fix1", "fix2", ...) decorator.
-    fn extract_usefixtures_names(
-        expr: &Expr,
-    ) -> Vec<(String, rustpython_parser::text_size::TextRange)> {
-        let Expr::Call(call) = expr else {
-            return vec![];
-        };
-        if !Self::is_usefixtures_decorator(&call.func) {
-            return vec![];
-        }
-
-        call.args
-            .iter()
-            .filter_map(|arg| {
-                if let Expr::Constant(c) = arg {
-                    if let rustpython_parser::ast::Constant::Str(s) = &c.value {
-                        return Some((s.to_string(), c.range));
-                    }
-                }
-                None
-            })
-            .collect()
-    }
-
-    /// Checks if an expression is a pytest.mark.parametrize decorator.
-    pub(crate) fn is_parametrize_decorator(expr: &Expr) -> bool {
-        match expr {
-            Expr::Call(call) => Self::is_parametrize_decorator(&call.func),
-            Expr::Attribute(attr) => {
-                if attr.attr.as_str() != "parametrize" {
-                    return false;
-                }
-                match &*attr.value {
-                    Expr::Attribute(inner_attr) => {
-                        if inner_attr.attr.as_str() != "mark" {
-                            return false;
-                        }
-                        matches!(&*inner_attr.value, Expr::Name(name) if name.id.as_str() == "pytest")
-                    }
-                    Expr::Name(name) => name.id.as_str() == "mark",
-                    _ => false,
-                }
-            }
-            _ => false,
-        }
-    }
-
-    /// Extracts fixture names from @pytest.mark.parametrize when indirect=True.
-    fn extract_parametrize_indirect_fixtures(
-        expr: &Expr,
-    ) -> Vec<(String, rustpython_parser::text_size::TextRange)> {
-        let Expr::Call(call) = expr else {
-            return vec![];
-        };
-        if !Self::is_parametrize_decorator(&call.func) {
-            return vec![];
-        }
-
-        let indirect_value = call.keywords.iter().find_map(|kw| {
-            if kw.arg.as_ref().is_some_and(|a| a.as_str() == "indirect") {
-                Some(&kw.value)
-            } else {
-                None
-            }
-        });
-
-        let Some(indirect) = indirect_value else {
-            return vec![];
-        };
-
-        let Some(first_arg) = call.args.first() else {
-            return vec![];
-        };
-
-        let Expr::Constant(param_const) = first_arg else {
-            return vec![];
-        };
-
-        let rustpython_parser::ast::Constant::Str(param_str) = &param_const.value else {
-            return vec![];
-        };
-
-        let param_names: Vec<&str> = param_str.split(',').map(|s| s.trim()).collect();
-
-        match indirect {
-            Expr::Constant(c) => {
-                if matches!(c.value, rustpython_parser::ast::Constant::Bool(true)) {
-                    return param_names
-                        .into_iter()
-                        .map(|name| (name.to_string(), param_const.range))
-                        .collect();
-                }
-            }
-            Expr::List(list) => {
-                return list
-                    .elts
-                    .iter()
-                    .filter_map(|elt| {
-                        if let Expr::Constant(c) = elt {
-                            if let rustpython_parser::ast::Constant::Str(s) = &c.value {
-                                if param_names.contains(&s.as_str()) {
-                                    return Some((s.to_string(), c.range));
-                                }
-                            }
-                        }
-                        None
-                    })
-                    .collect();
-            }
-            _ => {}
-        }
-
-        vec![]
-    }
 }
 
 // Second impl block for additional analyzer methods
@@ -711,7 +537,7 @@ impl FixtureDatabase {
                 let is_fixture = func_def
                     .decorator_list
                     .iter()
-                    .any(Self::is_fixture_decorator);
+                    .any(decorators::is_fixture_decorator);
                 if !is_fixture {
                     names.insert(func_def.name.to_string());
                 }
@@ -720,7 +546,7 @@ impl FixtureDatabase {
                 let is_fixture = func_def
                     .decorator_list
                     .iter()
-                    .any(Self::is_fixture_decorator);
+                    .any(decorators::is_fixture_decorator);
                 if !is_fixture {
                     names.insert(func_def.name.to_string());
                 }
@@ -774,62 +600,7 @@ impl FixtureDatabase {
     }
 
     fn format_docstring(&self, docstring: String) -> String {
-        let lines: Vec<&str> = docstring.lines().collect();
-
-        if lines.is_empty() {
-            return String::new();
-        }
-
-        let mut start = 0;
-        let mut end = lines.len();
-
-        while start < lines.len() && lines[start].trim().is_empty() {
-            start += 1;
-        }
-
-        while end > start && lines[end - 1].trim().is_empty() {
-            end -= 1;
-        }
-
-        if start >= end {
-            return String::new();
-        }
-
-        let lines = &lines[start..end];
-
-        let mut min_indent = usize::MAX;
-        for (i, line) in lines.iter().enumerate() {
-            if i == 0 && !line.trim().is_empty() {
-                continue;
-            }
-
-            if !line.trim().is_empty() {
-                let indent = line.len() - line.trim_start().len();
-                min_indent = min_indent.min(indent);
-            }
-        }
-
-        if min_indent == usize::MAX {
-            min_indent = 0;
-        }
-
-        let mut result = Vec::new();
-        for (i, line) in lines.iter().enumerate() {
-            if i == 0 {
-                result.push(line.trim().to_string());
-            } else if line.trim().is_empty() {
-                result.push(String::new());
-            } else {
-                let dedented = if line.len() > min_indent {
-                    &line[min_indent..]
-                } else {
-                    line.trim_start()
-                };
-                result.push(dedented.to_string());
-            }
-        }
-
-        result.join("\n")
+        super::string_utils::format_docstring(docstring)
     }
 
     fn extract_return_type(
@@ -961,18 +732,7 @@ impl FixtureDatabase {
         line: usize,
         func_name: &str,
     ) -> (usize, usize) {
-        if let Some(line_content) = content.lines().nth(line.saturating_sub(1)) {
-            if let Some(def_pos) = line_content.find("def ") {
-                let search_start = def_pos + 4;
-                if let Some(name_start) = line_content[search_start..].find(func_name) {
-                    let start_char = search_start + name_start;
-                    let end_char = start_char + func_name.len();
-                    return (start_char, end_char);
-                }
-            }
-        }
-
-        (0, func_name.len())
+        super::string_utils::find_function_name_position(content, line, func_name)
     }
 }
 
