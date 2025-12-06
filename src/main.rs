@@ -105,7 +105,7 @@ impl LanguageServer for Backend {
                 )),
                 completion_provider: Some(CompletionOptions {
                     resolve_provider: Some(false),
-                    trigger_characters: Some(vec![]),
+                    trigger_characters: Some(vec!["\"".to_string()]),
                     all_commit_characters: None,
                     work_done_progress_options: WorkDoneProgressOptions {
                         work_done_progress: None,
@@ -499,52 +499,54 @@ impl LanguageServer for Backend {
         );
 
         if let Some(file_path) = self.uri_to_path(&uri) {
-            // Check if we're inside a test or fixture function
-            if let Some((function_name, is_fixture, declared_params)) = self
-                .fixture_db
-                .is_inside_function(&file_path, position.line, position.character)
-            {
-                info!(
-                    "Inside function '{}' (is_fixture={}, params={:?})",
-                    function_name, is_fixture, declared_params
-                );
+            // Get the completion context
+            use pytest_language_server::CompletionContext;
 
-                // Get all available fixtures for this file
-                let available_fixtures = self.fixture_db.get_available_fixtures(&file_path);
-                info!("Found {} available fixtures", available_fixtures.len());
+            if let Some(ctx) = self.fixture_db.get_completion_context(
+                &file_path,
+                position.line,
+                position.character,
+            ) {
+                info!("Completion context: {:?}", ctx);
 
-                // Convert to completion items
-                let completion_items: Vec<CompletionItem> = available_fixtures
-                    .into_iter()
-                    .map(|fixture| {
-                        let mut detail = "pytest fixture".to_string();
-                        if let Some(file_name) = fixture.file_path.file_name() {
-                            detail.push_str(&format!(" from {}", file_name.to_string_lossy()));
-                        }
+                // Get workspace root for formatting documentation
+                let workspace_root = self.workspace_root.read().await.clone();
 
-                        let documentation = fixture.docstring.as_ref().map(|doc| {
-                            Documentation::MarkupContent(MarkupContent {
-                                kind: MarkupKind::Markdown,
-                                value: doc.clone(),
-                            })
-                        });
-
-                        CompletionItem {
-                            label: fixture.name.clone(),
-                            kind: Some(CompletionItemKind::VALUE),
-                            detail: Some(detail),
-                            documentation,
-                            insert_text: Some(fixture.name.clone()),
-                            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
-                            ..Default::default()
-                        }
-                    })
-                    .collect();
-
-                info!("Returning {} completion items", completion_items.len());
-                return Ok(Some(CompletionResponse::Array(completion_items)));
+                match ctx {
+                    CompletionContext::FunctionSignature {
+                        declared_params, ..
+                    } => {
+                        // In function signature - suggest fixtures as parameters (filter already declared)
+                        return Ok(Some(self.create_fixture_completions(
+                            &file_path,
+                            &declared_params,
+                            workspace_root.as_ref(),
+                        )));
+                    }
+                    CompletionContext::FunctionBody {
+                        function_line,
+                        declared_params,
+                        ..
+                    } => {
+                        // In function body - suggest fixtures with auto-add to parameters
+                        return Ok(Some(self.create_fixture_completions_with_auto_add(
+                            &file_path,
+                            &declared_params,
+                            function_line,
+                            workspace_root.as_ref(),
+                        )));
+                    }
+                    CompletionContext::UsefixuturesDecorator
+                    | CompletionContext::ParametrizeIndirect => {
+                        // In decorator - suggest fixture names as strings
+                        return Ok(Some(self.create_string_fixture_completions(
+                            &file_path,
+                            workspace_root.as_ref(),
+                        )));
+                    }
+                }
             } else {
-                info!("Not inside a test or fixture function");
+                info!("No completion context found");
             }
         }
 
@@ -980,6 +982,205 @@ impl Backend {
         self.client
             .publish_diagnostics(uri.clone(), diagnostics, None)
             .await;
+    }
+
+    /// Format fixture documentation for display (used in both hover and completions)
+    fn format_fixture_documentation(
+        &self,
+        fixture: &pytest_language_server::FixtureDefinition,
+        workspace_root: Option<&PathBuf>,
+    ) -> String {
+        let mut content = String::new();
+
+        // Calculate relative path from workspace root
+        let relative_path = if let Some(root) = workspace_root {
+            fixture
+                .file_path
+                .strip_prefix(root)
+                .ok()
+                .and_then(|p| p.to_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    fixture
+                        .file_path
+                        .file_name()
+                        .and_then(|f| f.to_str())
+                        .unwrap_or("unknown")
+                        .to_string()
+                })
+        } else {
+            fixture
+                .file_path
+                .file_name()
+                .and_then(|f| f.to_str())
+                .unwrap_or("unknown")
+                .to_string()
+        };
+
+        // Add "from" line with relative path
+        content.push_str(&format!("**from** `{}`\n", relative_path));
+
+        // Add code block with fixture signature
+        let return_annotation = if let Some(ref ret_type) = &fixture.return_type {
+            format!(" -> {}", ret_type)
+        } else {
+            String::new()
+        };
+
+        content.push_str(&format!(
+            "```python\n@pytest.fixture\ndef {}(...){}:\n```",
+            fixture.name, return_annotation
+        ));
+
+        // Add docstring if present
+        if let Some(ref docstring) = fixture.docstring {
+            content.push_str("\n\n---\n\n");
+            content.push_str(docstring);
+        }
+
+        content
+    }
+
+    /// Create completion items for fixtures (for function signature context)
+    /// Filters out already-declared parameters
+    fn create_fixture_completions(
+        &self,
+        file_path: &std::path::Path,
+        declared_params: &[String],
+        workspace_root: Option<&PathBuf>,
+    ) -> CompletionResponse {
+        let available = self.fixture_db.get_available_fixtures(file_path);
+        let mut items = Vec::new();
+
+        for fixture in available {
+            // Skip fixtures that are already declared as parameters
+            if declared_params.contains(&fixture.name) {
+                continue;
+            }
+
+            let detail = fixture
+                .file_path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string());
+
+            let doc_content = self.format_fixture_documentation(&fixture, workspace_root);
+            let documentation = Some(Documentation::MarkupContent(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: doc_content,
+            }));
+
+            items.push(CompletionItem {
+                label: fixture.name.clone(),
+                kind: Some(CompletionItemKind::VARIABLE),
+                detail,
+                documentation,
+                insert_text: Some(fixture.name.clone()),
+                insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+                ..Default::default()
+            });
+        }
+
+        CompletionResponse::Array(items)
+    }
+
+    /// Create completion items for fixtures with auto-add to function parameters
+    /// When a completion is confirmed, it also inserts the fixture as a parameter
+    fn create_fixture_completions_with_auto_add(
+        &self,
+        file_path: &std::path::Path,
+        declared_params: &[String],
+        function_line: usize,
+        workspace_root: Option<&PathBuf>,
+    ) -> CompletionResponse {
+        let available = self.fixture_db.get_available_fixtures(file_path);
+        let mut items = Vec::new();
+
+        // Get insertion info for adding new parameters
+        let insertion_info = self
+            .fixture_db
+            .get_function_param_insertion_info(file_path, function_line);
+
+        for fixture in available {
+            // Skip fixtures that are already declared as parameters
+            if declared_params.contains(&fixture.name) {
+                continue;
+            }
+
+            let detail = fixture
+                .file_path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string());
+
+            let doc_content = self.format_fixture_documentation(&fixture, workspace_root);
+            let documentation = Some(Documentation::MarkupContent(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: doc_content,
+            }));
+
+            // Create additional text edit to add the fixture as a parameter
+            let additional_text_edits = insertion_info.as_ref().map(|info| {
+                let text = if info.needs_comma {
+                    format!(", {}", fixture.name)
+                } else {
+                    fixture.name.clone()
+                };
+                let lsp_line = Self::internal_line_to_lsp(info.line);
+                vec![TextEdit {
+                    range: Self::create_point_range(lsp_line, info.char_pos as u32),
+                    new_text: text,
+                }]
+            });
+
+            items.push(CompletionItem {
+                label: fixture.name.clone(),
+                kind: Some(CompletionItemKind::VARIABLE),
+                detail,
+                documentation,
+                insert_text: Some(fixture.name.clone()),
+                insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+                additional_text_edits,
+                ..Default::default()
+            });
+        }
+
+        CompletionResponse::Array(items)
+    }
+
+    /// Create completion items for fixture names as strings (for decorators)
+    /// Used in @pytest.mark.usefixtures("...") and @pytest.mark.parametrize(..., indirect=["..."])
+    fn create_string_fixture_completions(
+        &self,
+        file_path: &std::path::Path,
+        workspace_root: Option<&PathBuf>,
+    ) -> CompletionResponse {
+        let available = self.fixture_db.get_available_fixtures(file_path);
+        let mut items = Vec::new();
+
+        for fixture in available {
+            let detail = fixture
+                .file_path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string());
+
+            let doc_content = self.format_fixture_documentation(&fixture, workspace_root);
+            let documentation = Some(Documentation::MarkupContent(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: doc_content,
+            }));
+
+            items.push(CompletionItem {
+                label: fixture.name.clone(),
+                kind: Some(CompletionItemKind::TEXT),
+                detail,
+                documentation,
+                // Don't add quotes - user is already inside a string
+                insert_text: Some(fixture.name.clone()),
+                insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+                ..Default::default()
+            });
+        }
+
+        CompletionResponse::Array(items)
     }
 }
 

@@ -24,7 +24,7 @@ This ensures the user maintains full control over their git workflow.
 - **Language**: Rust (Edition 2021, MSRV 1.83)
 - **Lines of Code**: ~3,120 lines (2,254 in fixtures.rs, 861 in main.rs)
 - **Architecture**: Async LSP server using tower-lsp with CLI support via clap
-- **Key Features**: Fixture go-to-definition, find-references, hover docs, rename symbol, fixture overriding, undeclared fixture diagnostics, CLI commands, `@pytest.mark.usefixtures` support, `@pytest.mark.parametrize` indirect fixtures
+- **Key Features**: Fixture go-to-definition, find-references, hover docs, rename symbol, **code completion**, fixture overriding, undeclared fixture diagnostics, CLI commands, `@pytest.mark.usefixtures` support, `@pytest.mark.parametrize` indirect fixtures
 
 ## Core Architecture
 
@@ -115,6 +115,35 @@ pub enum RenameError {
     ThirdPartyFixture(String),   // Cannot rename site-packages fixtures
     InvalidNewName(String),      // Not a valid Python identifier
 }
+
+// Completion-related types:
+
+pub enum CompletionContext {
+    /// Inside a function signature (parameter list) - suggest fixtures as parameters
+    FunctionSignature {
+        function_name: String,
+        function_line: usize,
+        is_fixture: bool,
+        declared_params: Vec<String>,
+    },
+    /// Inside a function body - suggest fixtures with auto-add to parameters
+    FunctionBody {
+        function_name: String,
+        function_line: usize,
+        is_fixture: bool,
+        declared_params: Vec<String>,
+    },
+    /// Inside @pytest.mark.usefixtures("...") decorator
+    UsefixuturesDecorator,
+    /// Inside @pytest.mark.parametrize(..., indirect=...) decorator
+    ParametrizeIndirect,
+}
+
+pub struct ParamInsertionInfo {
+    pub line: usize,        // Line number (1-indexed) where to insert
+    pub char_pos: usize,    // Character position for insertion
+    pub needs_comma: bool,  // Whether to prepend comma before new param
+}
 ```
 
 ## Pytest Fixture Resolution Rules
@@ -158,6 +187,9 @@ This is handled by `start_char` and `end_char` in `FixtureUsage`.
 - `is_builtin_fixture(&self, name: &str)` - Checks if fixture is a pytest built-in
 - `is_third_party_fixture(&self, name: &str, file_path: &Path)` - Checks if fixture is from site-packages
 - `is_valid_python_identifier(name: &str)` - Validates new name is a valid Python identifier
+- `get_completion_context(&self, file_path: &Path, line: u32, char: u32)` - Determines completion context (signature, body, decorator)
+- `get_function_param_insertion_info(&self, file_path: &Path, function_line: usize)` - Gets where to insert new parameters
+- `get_available_fixtures(&self, file_path: &Path)` - Returns all fixtures available at a file location
 
 **AST Parsing:**
 - Uses `rustpython-parser` to parse Python files
@@ -180,11 +212,18 @@ This is handled by `start_char` and `end_char` in `FixtureUsage`.
 - `goto_definition()` - Calls `find_fixture_at_position()` then `find_fixture_definition()`
 - `references()` - Finds all references, ensures current position is included (LSP spec compliance)
 - `hover()` - Shows fixture signature and docstring in Markdown format
+- `completion()` - Context-aware fixture completions with auto-add parameter support
 - `did_open()`, `did_change()` - Re-analyzes files when opened/modified, publishes diagnostics
 - `code_action()` - Provides quick fixes to add missing fixture parameters
 - `publish_diagnostics_for_file()` - Publishes warnings for undeclared fixtures
 - `prepare_rename()` - Validates rename is possible, returns fixture name range
 - `rename()` - Performs rename across all usages, returns WorkspaceEdit
+
+**Completion Helpers:**
+- `format_fixture_documentation()` - Formats fixture info for hover/completion (consistent display)
+- `create_fixture_completions()` - Creates completion items for function signatures
+- `create_fixture_completions_with_auto_add()` - Creates completions that also add to parameters
+- `create_string_fixture_completions()` - Creates completions for decorator strings
 
 ## Testing
 
@@ -225,9 +264,9 @@ RUST_LOG=debug cargo test          # Run with debug logging
 
 ### Test Coverage
 
-- **306 total tests passing** (as of latest)
-  - 234 integration tests in `tests/test_fixtures.rs` (FixtureDatabase API)
-  - 40 integration tests in `tests/test_lsp.rs` (LSP protocol handlers)
+- **320 total tests passing** (as of latest)
+  - 242 integration tests in `tests/test_fixtures.rs` (FixtureDatabase API)
+  - 46 integration tests in `tests/test_lsp.rs` (LSP protocol handlers)
   - 32 integration tests in `tests/test_e2e.rs` (End-to-end CLI and workspace tests)
 
 **Key test areas:**
@@ -638,7 +677,14 @@ The project includes extensions for three major editors/IDEs:
 
 ## Version History
 
-- **v0.12.0** (December 2025) - Current version
+- **v0.13.0** (December 2025) - Current version
+  - Added LSP code completion support for fixtures
+  - Context-aware completions: function signatures, function bodies, decorators
+  - Auto-add fixture to parameters when completing in function body
+  - Trigger character `"` for usefixtures decorator completions
+  - Consistent documentation format between hover and completions
+  - Test suite: 320 tests (242 unit + 46 LSP + 32 E2E)
+- **v0.12.0** (December 2025)
   - Added LSP rename symbol support for fixtures
   - Scope-aware rename: only renames usages that resolve to the specific definition
   - Added validation: rejects builtin fixtures, third-party fixtures, invalid Python identifiers
@@ -664,6 +710,6 @@ The project includes extensions for three major editors/IDEs:
 
 ---
 
-**Last Updated**: v0.12.0 (December 2025)
+**Last Updated**: v0.13.0 (December 2025)
 
 This document should be updated when making significant architectural changes or adding new features.

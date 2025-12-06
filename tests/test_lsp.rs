@@ -2083,3 +2083,220 @@ def test_both(fixture_a, fixture_b):
     // fixture_a and fixture_b should have different positions
     assert_ne!(a_positions, b_positions);
 }
+
+// ============================================================================
+// Completion Tests
+// ============================================================================
+
+#[test]
+fn test_completion_in_function_signature_returns_fixtures() {
+    use pytest_language_server::{CompletionContext, FixtureDatabase};
+
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return 42
+
+@pytest.fixture
+def another_fixture():
+    return "hello"
+"#;
+
+    let conftest_path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let test_content = r#"
+def test_something():
+    pass
+"#;
+
+    let test_path = PathBuf::from("/tmp/test/test_completion.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Check that completion context is detected
+    // Line 1 (0-indexed): "def test_something():"
+    // Cursor inside parentheses
+    let ctx = db.get_completion_context(&test_path, 1, 18);
+    assert!(ctx.is_some());
+
+    match ctx.unwrap() {
+        CompletionContext::FunctionSignature {
+            declared_params, ..
+        } => {
+            assert!(declared_params.is_empty());
+        }
+        _ => panic!("Expected FunctionSignature context"),
+    }
+
+    // Check available fixtures
+    let available = db.get_available_fixtures(&test_path);
+    let fixture_names: Vec<_> = available.iter().map(|f| &f.name).collect();
+
+    assert!(fixture_names.contains(&&"my_fixture".to_string()));
+    assert!(fixture_names.contains(&&"another_fixture".to_string()));
+}
+
+#[test]
+fn test_completion_filters_already_declared_params() {
+    use pytest_language_server::{CompletionContext, FixtureDatabase};
+
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return 42
+
+@pytest.fixture
+def another_fixture():
+    return "hello"
+"#;
+
+    let conftest_path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let test_content = r#"
+def test_something(my_fixture, ):
+    pass
+"#;
+
+    let test_path = PathBuf::from("/tmp/test/test_completion.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Check completion context
+    let ctx = db.get_completion_context(&test_path, 1, 31);
+    assert!(ctx.is_some());
+
+    match ctx.unwrap() {
+        CompletionContext::FunctionSignature {
+            declared_params, ..
+        } => {
+            // my_fixture is already declared
+            assert!(declared_params.contains(&"my_fixture".to_string()));
+        }
+        _ => panic!("Expected FunctionSignature context"),
+    }
+}
+
+#[test]
+fn test_completion_function_body_detects_context() {
+    use pytest_language_server::{CompletionContext, FixtureDatabase};
+
+    let db = FixtureDatabase::new();
+
+    let test_content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return 42
+
+def test_something(my_fixture):
+    # cursor here
+    pass
+"#;
+
+    let test_path = PathBuf::from("/tmp/test/test_completion.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Line 8 (0-indexed): "    # cursor here"
+    let ctx = db.get_completion_context(&test_path, 8, 10);
+    assert!(ctx.is_some());
+
+    match ctx.unwrap() {
+        CompletionContext::FunctionBody {
+            function_name,
+            function_line,
+            declared_params,
+            ..
+        } => {
+            assert_eq!(function_name, "test_something");
+            assert!(declared_params.contains(&"my_fixture".to_string()));
+            assert!(function_line > 0);
+        }
+        _ => panic!("Expected FunctionBody context"),
+    }
+}
+
+#[test]
+fn test_param_insertion_info_basic() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let test_content = r#"
+def test_something():
+    pass
+"#;
+
+    let test_path = PathBuf::from("/tmp/test/test_completion.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Function on line 2 (1-indexed)
+    let info = db.get_function_param_insertion_info(&test_path, 2);
+    assert!(info.is_some());
+
+    let info = info.unwrap();
+    assert!(!info.needs_comma); // No existing params
+    assert_eq!(info.line, 2);
+}
+
+#[test]
+fn test_param_insertion_info_with_existing_params() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let test_content = r#"
+def test_something(existing_fixture):
+    pass
+"#;
+
+    let test_path = PathBuf::from("/tmp/test/test_completion.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Function on line 2 (1-indexed)
+    let info = db.get_function_param_insertion_info(&test_path, 2);
+    assert!(info.is_some());
+
+    let info = info.unwrap();
+    assert!(info.needs_comma); // Has existing param
+}
+
+#[test]
+fn test_completion_usefixtures_decorator_context() {
+    use pytest_language_server::{CompletionContext, FixtureDatabase};
+
+    let db = FixtureDatabase::new();
+
+    let test_content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return 42
+
+@pytest.mark.usefixtures("")
+def test_something():
+    pass
+"#;
+
+    let test_path = PathBuf::from("/tmp/test/test_completion.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Position inside the quotes of usefixtures
+    // Line 7 (0-indexed): "@pytest.mark.usefixtures("")"
+    let ctx = db.get_completion_context(&test_path, 7, 27);
+    assert!(ctx.is_some());
+
+    match ctx.unwrap() {
+        CompletionContext::UsefixuturesDecorator => {}
+        _ => panic!("Expected UsefixuturesDecorator context"),
+    }
+}

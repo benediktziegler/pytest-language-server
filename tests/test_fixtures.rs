@@ -9057,3 +9057,264 @@ fn test_is_builtin_fixture() {
     assert!(!FixtureDatabase::is_builtin_fixture("my_custom_fixture"));
     assert!(!FixtureDatabase::is_builtin_fixture("mocker")); // third-party, not builtin
 }
+
+// ============================================================================
+// Completion Context Tests
+// ============================================================================
+
+#[test]
+fn test_completion_context_function_signature() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    let test_content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return 42
+
+def test_something():
+    pass
+"#;
+
+    let test_path = PathBuf::from("/tmp/test/test_completion.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // LSP uses 0-indexed lines, position inside the parentheses of test_something()
+    // Line 7 (0-indexed) is "def test_something():"
+    // Cursor at position 18 (inside parentheses)
+    let ctx = db.get_completion_context(&test_path, 7, 18);
+
+    assert!(ctx.is_some());
+    match ctx.unwrap() {
+        CompletionContext::FunctionSignature {
+            function_name,
+            is_fixture,
+            declared_params,
+            ..
+        } => {
+            assert_eq!(function_name, "test_something");
+            assert!(!is_fixture);
+            assert!(declared_params.is_empty());
+        }
+        _ => panic!("Expected FunctionSignature context"),
+    }
+}
+
+#[test]
+fn test_completion_context_function_signature_with_params() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    let test_content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return 42
+
+def test_something(my_fixture, ):
+    pass
+"#;
+
+    let test_path = PathBuf::from("/tmp/test/test_completion.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Position after the comma, inside parentheses
+    // Line 7 (0-indexed): "def test_something(my_fixture, ):"
+    // Cursor at position 31 (after the comma and space)
+    let ctx = db.get_completion_context(&test_path, 7, 31);
+
+    assert!(ctx.is_some());
+    match ctx.unwrap() {
+        CompletionContext::FunctionSignature {
+            function_name,
+            is_fixture,
+            declared_params,
+            ..
+        } => {
+            assert_eq!(function_name, "test_something");
+            assert!(!is_fixture);
+            assert_eq!(declared_params, vec!["my_fixture"]);
+        }
+        _ => panic!("Expected FunctionSignature context"),
+    }
+}
+
+#[test]
+fn test_completion_context_function_body() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    let test_content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return 42
+
+def test_something(my_fixture):
+
+    pass
+"#;
+
+    let test_path = PathBuf::from("/tmp/test/test_completion.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Position inside the function body (the empty line)
+    // Line 8 (0-indexed) is the empty line inside the function
+    let ctx = db.get_completion_context(&test_path, 8, 4);
+
+    assert!(ctx.is_some());
+    match ctx.unwrap() {
+        CompletionContext::FunctionBody {
+            function_name,
+            is_fixture,
+            declared_params,
+            ..
+        } => {
+            assert_eq!(function_name, "test_something");
+            assert!(!is_fixture);
+            assert_eq!(declared_params, vec!["my_fixture"]);
+        }
+        _ => panic!("Expected FunctionBody context"),
+    }
+}
+
+#[test]
+fn test_completion_context_fixture_function() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    let test_content = r#"
+import pytest
+
+@pytest.fixture
+def base_fixture():
+    return 42
+
+@pytest.fixture
+def dependent_fixture():
+    pass
+"#;
+
+    let test_path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Position inside parentheses of dependent_fixture
+    // Line 8 (0-indexed): "@pytest.fixture" followed by line 9: "def dependent_fixture():"
+    let ctx = db.get_completion_context(&test_path, 8, 22);
+
+    assert!(ctx.is_some());
+    match ctx.unwrap() {
+        CompletionContext::FunctionSignature {
+            function_name,
+            is_fixture,
+            declared_params,
+            ..
+        } => {
+            assert_eq!(function_name, "dependent_fixture");
+            assert!(is_fixture);
+            assert!(declared_params.is_empty());
+        }
+        _ => panic!("Expected FunctionSignature context"),
+    }
+}
+
+#[test]
+fn test_completion_context_usefixtures_decorator() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    let test_content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return 42
+
+@pytest.mark.usefixtures("")
+def test_something():
+    pass
+"#;
+
+    let test_path = PathBuf::from("/tmp/test/test_completion.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Position inside the string of usefixtures decorator
+    // Line 7 (0-indexed): "@pytest.mark.usefixtures("")"
+    // Cursor at position 27 (inside the empty quotes)
+    let ctx = db.get_completion_context(&test_path, 7, 27);
+
+    assert!(ctx.is_some());
+    match ctx.unwrap() {
+        CompletionContext::UsefixuturesDecorator => {}
+        _ => panic!("Expected UsefixuturesDecorator context"),
+    }
+}
+
+#[test]
+fn test_completion_context_outside_function() {
+    let db = FixtureDatabase::new();
+
+    let test_content = r#"
+import pytest
+
+# A comment
+
+def test_something():
+    pass
+"#;
+
+    let test_path = PathBuf::from("/tmp/test/test_completion.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Position on the comment line (not inside a function)
+    // Line 3 (0-indexed): "# A comment"
+    let ctx = db.get_completion_context(&test_path, 3, 5);
+
+    assert!(ctx.is_none());
+}
+
+#[test]
+fn test_get_function_param_insertion_info_empty_params() {
+    let db = FixtureDatabase::new();
+
+    let test_content = r#"
+def test_something():
+    pass
+"#;
+
+    let test_path = PathBuf::from("/tmp/test/test_completion.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Function is on line 2 (1-indexed)
+    let info = db.get_function_param_insertion_info(&test_path, 2);
+
+    assert!(info.is_some());
+    let info = info.unwrap();
+    assert_eq!(info.line, 2);
+    assert!(!info.needs_comma);
+}
+
+#[test]
+fn test_get_function_param_insertion_info_with_params() {
+    let db = FixtureDatabase::new();
+
+    let test_content = r#"
+def test_something(existing_param):
+    pass
+"#;
+
+    let test_path = PathBuf::from("/tmp/test/test_completion.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Function is on line 2 (1-indexed)
+    let info = db.get_function_param_insertion_info(&test_path, 2);
+
+    assert!(info.is_some());
+    let info = info.unwrap();
+    assert_eq!(info.line, 2);
+    assert!(info.needs_comma);
+}

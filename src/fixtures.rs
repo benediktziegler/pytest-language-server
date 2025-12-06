@@ -1,5 +1,5 @@
 use dashmap::DashMap;
-use rustpython_parser::ast::{ArgWithDefault, Arguments, Expr, Stmt};
+use rustpython_parser::ast::{ArgWithDefault, Arguments, Expr, Ranged, Stmt};
 use rustpython_parser::{parse, Mode};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -67,6 +67,40 @@ pub enum RenameError {
     CannotRenameThirdParty(String),
     /// Invalid new name (not a valid Python identifier)
     InvalidName(String),
+}
+
+/// Context for code completion
+#[derive(Debug, Clone, PartialEq)]
+pub enum CompletionContext {
+    /// Inside a function signature (parameter list) - suggest fixtures as parameters
+    FunctionSignature {
+        function_name: String,
+        function_line: usize,
+        is_fixture: bool,
+        declared_params: Vec<String>,
+    },
+    /// Inside a function body - suggest fixtures with auto-add to parameters
+    FunctionBody {
+        function_name: String,
+        function_line: usize,
+        is_fixture: bool,
+        declared_params: Vec<String>,
+    },
+    /// Inside @pytest.mark.usefixtures("...") decorator - suggest fixture names as strings
+    UsefixuturesDecorator,
+    /// Inside @pytest.mark.parametrize(..., indirect=...) - suggest fixture names as strings
+    ParametrizeIndirect,
+}
+
+/// Information about where to insert a new parameter in a function signature
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParamInsertionInfo {
+    /// Line number (1-indexed) where the function signature is
+    pub line: usize,
+    /// Character position where the new parameter should be inserted
+    pub char_pos: usize,
+    /// Whether a comma needs to be added before the new parameter
+    pub needs_comma: bool,
 }
 
 #[derive(Debug)]
@@ -3136,6 +3170,255 @@ impl FixtureDatabase {
                     }
                 }
                 _ => {}
+            }
+        }
+
+        None
+    }
+
+    /// Get the completion context for a given position
+    /// This determines what kind of completions should be offered
+    pub fn get_completion_context(
+        &self,
+        file_path: &Path,
+        line: u32,
+        character: u32,
+    ) -> Option<CompletionContext> {
+        let content = self.get_file_content(file_path)?;
+        let target_line = (line + 1) as usize; // Convert to 1-based
+
+        // Parse the file
+        let parsed = parse(&content, Mode::Module, "").ok()?;
+
+        if let rustpython_parser::ast::Mod::Module(module) = parsed {
+            // First check if we're inside a decorator (usefixtures or parametrize)
+            if let Some(ctx) = Self::check_decorator_context(&module.body, &content, target_line) {
+                return Some(ctx);
+            }
+
+            // Then check for function context
+            return self.get_function_completion_context(
+                &module.body,
+                &content,
+                target_line,
+                character as usize,
+            );
+        }
+
+        None
+    }
+
+    /// Check if the cursor is inside a decorator that needs fixture completions
+    fn check_decorator_context(
+        stmts: &[Stmt],
+        content: &str,
+        target_line: usize,
+    ) -> Option<CompletionContext> {
+        for stmt in stmts {
+            let decorator_list = match stmt {
+                Stmt::FunctionDef(f) => &f.decorator_list,
+                Stmt::AsyncFunctionDef(f) => &f.decorator_list,
+                Stmt::ClassDef(c) => &c.decorator_list,
+                _ => continue,
+            };
+
+            for decorator in decorator_list {
+                let dec_start_line = content[..decorator.range().start().to_usize()]
+                    .matches('\n')
+                    .count()
+                    + 1;
+                let dec_end_line = content[..decorator.range().end().to_usize()]
+                    .matches('\n')
+                    .count()
+                    + 1;
+
+                if target_line >= dec_start_line && target_line <= dec_end_line {
+                    // Check if it's a usefixtures decorator
+                    if Self::is_usefixtures_decorator(decorator) {
+                        return Some(CompletionContext::UsefixuturesDecorator);
+                    }
+                    // Check if it's a parametrize decorator with indirect
+                    if Self::is_parametrize_decorator(decorator) {
+                        return Some(CompletionContext::ParametrizeIndirect);
+                    }
+                }
+            }
+
+            // Recursively check class bodies
+            if let Stmt::ClassDef(class_def) = stmt {
+                if let Some(ctx) =
+                    Self::check_decorator_context(&class_def.body, content, target_line)
+                {
+                    return Some(ctx);
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Get completion context when cursor is inside a function
+    fn get_function_completion_context(
+        &self,
+        stmts: &[Stmt],
+        content: &str,
+        target_line: usize,
+        target_char: usize,
+    ) -> Option<CompletionContext> {
+        for stmt in stmts {
+            match stmt {
+                Stmt::FunctionDef(func_def) => {
+                    if let Some(ctx) = self.get_func_context(
+                        &func_def.name,
+                        &func_def.decorator_list,
+                        &func_def.args,
+                        func_def.range,
+                        content,
+                        target_line,
+                        target_char,
+                    ) {
+                        return Some(ctx);
+                    }
+                }
+                Stmt::AsyncFunctionDef(func_def) => {
+                    if let Some(ctx) = self.get_func_context(
+                        &func_def.name,
+                        &func_def.decorator_list,
+                        &func_def.args,
+                        func_def.range,
+                        content,
+                        target_line,
+                        target_char,
+                    ) {
+                        return Some(ctx);
+                    }
+                }
+                Stmt::ClassDef(class_def) => {
+                    // Recursively check class body
+                    if let Some(ctx) = self.get_function_completion_context(
+                        &class_def.body,
+                        content,
+                        target_line,
+                        target_char,
+                    ) {
+                        return Some(ctx);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        None
+    }
+
+    /// Helper to get function completion context
+    #[allow(clippy::too_many_arguments)]
+    fn get_func_context(
+        &self,
+        func_name: &rustpython_parser::ast::Identifier,
+        decorator_list: &[Expr],
+        args: &Arguments,
+        range: rustpython_parser::text_size::TextRange,
+        content: &str,
+        target_line: usize,
+        _target_char: usize,
+    ) -> Option<CompletionContext> {
+        let func_start_line = content[..range.start().to_usize()].matches('\n').count() + 1;
+        let func_end_line = content[..range.end().to_usize()].matches('\n').count() + 1;
+
+        if target_line < func_start_line || target_line > func_end_line {
+            return None;
+        }
+
+        let is_fixture = decorator_list.iter().any(Self::is_fixture_decorator);
+        let is_test = func_name.as_str().starts_with("test_");
+
+        if !is_test && !is_fixture {
+            return None;
+        }
+
+        // Collect all parameters including positional-only and keyword-only
+        let params: Vec<String> = Self::all_args(args)
+            .map(|arg| arg.def.arg.to_string())
+            .collect();
+
+        // Find the line where the function signature ends (closing parenthesis + colon)
+        // We need to find "def func_name(...):""
+        let lines: Vec<&str> = content.lines().collect();
+
+        // Find the signature end line by looking for "):" pattern
+        let mut sig_end_line = func_start_line;
+        for (i, line) in lines
+            .iter()
+            .enumerate()
+            .skip(func_start_line.saturating_sub(1))
+        {
+            if line.contains("):") {
+                sig_end_line = i + 1; // 1-indexed
+                break;
+            }
+            // Stop if we've gone too far
+            if i + 1 > func_start_line + 10 {
+                break;
+            }
+        }
+
+        // Determine if cursor is in signature or body
+        let in_signature = target_line <= sig_end_line;
+
+        let context = if in_signature {
+            CompletionContext::FunctionSignature {
+                function_name: func_name.to_string(),
+                function_line: func_start_line,
+                is_fixture,
+                declared_params: params,
+            }
+        } else {
+            CompletionContext::FunctionBody {
+                function_name: func_name.to_string(),
+                function_line: func_start_line,
+                is_fixture,
+                declared_params: params,
+            }
+        };
+
+        Some(context)
+    }
+
+    /// Get information about where to insert a new parameter in a function signature
+    pub fn get_function_param_insertion_info(
+        &self,
+        file_path: &Path,
+        function_line: usize,
+    ) -> Option<ParamInsertionInfo> {
+        let content = self.get_file_content(file_path)?;
+        let lines: Vec<&str> = content.lines().collect();
+
+        // Find the closing parenthesis of the function signature
+        // Start from function_line (1-indexed) and look for "):"
+        for i in (function_line.saturating_sub(1))..lines.len().min(function_line + 10) {
+            let line = lines[i];
+            if let Some(paren_pos) = line.find("):") {
+                // Check if there are existing parameters
+                // Look for the opening parenthesis
+                let open_paren = if let Some(pos) = line.find('(') {
+                    pos
+                } else {
+                    // Opening paren might be on an earlier line for multiline signatures
+                    // For simplicity, we'll look at the function_line
+                    let func_line = lines.get(function_line.saturating_sub(1))?;
+                    func_line.find('(')?
+                };
+
+                // Check if there's content between ( and )
+                let params_section = &line[open_paren + 1..paren_pos];
+                let has_params = !params_section.trim().is_empty();
+
+                return Some(ParamInsertionInfo {
+                    line: i + 1, // Convert to 1-indexed
+                    char_pos: paren_pos,
+                    needs_comma: has_params,
+                });
             }
         }
 
