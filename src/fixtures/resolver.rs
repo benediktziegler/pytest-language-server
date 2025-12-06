@@ -108,12 +108,45 @@ impl FixtureDatabase {
         None
     }
 
-    /// Find the closest fixture definition based on pytest priority rules
+    /// Find the closest fixture definition based on pytest priority rules.
     pub(crate) fn find_closest_definition(
         &self,
         file_path: &Path,
         fixture_name: &str,
     ) -> Option<FixtureDefinition> {
+        self.find_closest_definition_with_filter(file_path, fixture_name, |_| true)
+    }
+
+    /// Find the closest definition, excluding a specific definition.
+    pub(crate) fn find_closest_definition_excluding(
+        &self,
+        file_path: &Path,
+        fixture_name: &str,
+        exclude: Option<&FixtureDefinition>,
+    ) -> Option<FixtureDefinition> {
+        self.find_closest_definition_with_filter(file_path, fixture_name, |def| {
+            if let Some(excluded) = exclude {
+                def != excluded
+            } else {
+                true
+            }
+        })
+    }
+
+    /// Internal helper that implements pytest priority rules with a custom filter.
+    /// Priority order:
+    /// 1. Same file (highest priority, last definition wins)
+    /// 2. Closest conftest.py in parent directories
+    /// 3. Third-party fixtures from site-packages
+    fn find_closest_definition_with_filter<F>(
+        &self,
+        file_path: &Path,
+        fixture_name: &str,
+        filter: F,
+    ) -> Option<FixtureDefinition>
+    where
+        F: Fn(&FixtureDefinition) -> bool,
+    {
         let definitions = self.definitions.get(fixture_name)?;
 
         // Priority 1: Same file (highest priority)
@@ -124,11 +157,11 @@ impl FixtureDatabase {
 
         if let Some(last_def) = definitions
             .iter()
-            .filter(|def| def.file_path == file_path)
+            .filter(|def| def.file_path == file_path && filter(def))
             .max_by_key(|def| def.line)
         {
             info!(
-                "Found fixture {} in same file at line {} (using last definition)",
+                "Found fixture {} in same file at line {}",
                 fixture_name, last_def.line
             );
             return Some(last_def.clone());
@@ -146,7 +179,7 @@ impl FixtureDatabase {
             debug!("  Checking conftest.py at: {:?}", conftest_path);
 
             for def in definitions.iter() {
-                if def.file_path == conftest_path {
+                if def.file_path == conftest_path && filter(def) {
                     info!(
                         "Found fixture {} in conftest.py: {:?}",
                         fixture_name, conftest_path
@@ -163,11 +196,11 @@ impl FixtureDatabase {
 
         // Priority 3: Third-party fixtures (site-packages)
         debug!(
-            "No fixture {} found in conftest hierarchy, checking for third-party fixtures",
+            "No fixture {} found in conftest hierarchy, checking third-party",
             fixture_name
         );
         for def in definitions.iter() {
-            if def.is_third_party {
+            if def.is_third_party && filter(def) {
                 info!(
                     "Found third-party fixture {} in site-packages: {:?}",
                     fixture_name, def.file_path
@@ -178,104 +211,6 @@ impl FixtureDatabase {
 
         debug!(
             "No fixture {} found in scope for {:?}",
-            fixture_name, file_path
-        );
-        None
-    }
-
-    /// Find the closest definition, excluding a specific definition
-    pub(crate) fn find_closest_definition_excluding(
-        &self,
-        file_path: &Path,
-        fixture_name: &str,
-        exclude: Option<&FixtureDefinition>,
-    ) -> Option<FixtureDefinition> {
-        let definitions = self.definitions.get(fixture_name)?;
-
-        // Priority 1: Same file, excluding the specified definition
-        debug!(
-            "Checking for fixture {} in same file: {:?} (excluding: {:?})",
-            fixture_name, file_path, exclude
-        );
-
-        if let Some(last_def) = definitions
-            .iter()
-            .filter(|def| {
-                if def.file_path != file_path {
-                    return false;
-                }
-                if let Some(excluded) = exclude {
-                    if def == &excluded {
-                        debug!("Skipping excluded definition at line {}", def.line);
-                        return false;
-                    }
-                }
-                true
-            })
-            .max_by_key(|def| def.line)
-        {
-            info!(
-                "Found fixture {} in same file at line {} (excluding specified)",
-                fixture_name, last_def.line
-            );
-            return Some(last_def.clone());
-        }
-
-        // Priority 2: Search upward through conftest.py files
-        let mut current_dir = file_path.parent()?;
-
-        debug!(
-            "Searching for fixture {} in conftest.py files starting from {:?}",
-            fixture_name, current_dir
-        );
-        loop {
-            let conftest_path = current_dir.join("conftest.py");
-            debug!("  Checking conftest.py at: {:?}", conftest_path);
-
-            for def in definitions.iter() {
-                if def.file_path == conftest_path {
-                    if let Some(excluded) = exclude {
-                        if def == excluded {
-                            debug!("Skipping excluded definition at line {}", def.line);
-                            continue;
-                        }
-                    }
-                    info!(
-                        "Found fixture {} in conftest.py: {:?}",
-                        fixture_name, conftest_path
-                    );
-                    return Some(def.clone());
-                }
-            }
-
-            match current_dir.parent() {
-                Some(parent) => current_dir = parent,
-                None => break,
-            }
-        }
-
-        // Priority 3: Third-party fixtures
-        debug!(
-            "No fixture {} found in conftest hierarchy (excluding specified), checking third-party",
-            fixture_name
-        );
-        for def in definitions.iter() {
-            if let Some(excluded) = exclude {
-                if def == excluded {
-                    continue;
-                }
-            }
-            if def.is_third_party {
-                info!(
-                    "Found third-party fixture {} in site-packages: {:?}",
-                    fixture_name, def.file_path
-                );
-                return Some(def.clone());
-            }
-        }
-
-        debug!(
-            "No fixture {} found in scope for {:?} (excluding specified)",
             fixture_name, file_path
         );
         None
