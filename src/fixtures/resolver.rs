@@ -9,7 +9,6 @@ use super::types::{
 };
 use super::FixtureDatabase;
 use rustpython_parser::ast::{Expr, Ranged, Stmt};
-use rustpython_parser::{parse, Mode};
 use std::collections::HashSet;
 use std::path::Path;
 use tracing::{debug, info};
@@ -445,12 +444,15 @@ impl FixtureDatabase {
     ) -> Option<CompletionContext> {
         let content = self.get_file_content(file_path)?;
         let target_line = (line + 1) as usize;
+        let line_index = self.get_line_index(file_path, &content);
 
-        let parsed = parse(&content, Mode::Module, "").ok()?;
+        let parsed = self.get_parsed_ast(file_path, &content)?;
 
-        if let rustpython_parser::ast::Mod::Module(module) = parsed {
+        if let rustpython_parser::ast::Mod::Module(module) = parsed.as_ref() {
             // First check if we're inside a decorator
-            if let Some(ctx) = Self::check_decorator_context(&module.body, &content, target_line) {
+            if let Some(ctx) =
+                self.check_decorator_context(&module.body, &content, target_line, &line_index)
+            {
                 return Some(ctx);
             }
 
@@ -460,6 +462,7 @@ impl FixtureDatabase {
                 &content,
                 target_line,
                 character as usize,
+                &line_index,
             );
         }
 
@@ -468,9 +471,11 @@ impl FixtureDatabase {
 
     /// Check if the cursor is inside a decorator that needs fixture completions
     fn check_decorator_context(
+        &self,
         stmts: &[Stmt],
-        content: &str,
+        _content: &str,
         target_line: usize,
+        line_index: &[usize],
     ) -> Option<CompletionContext> {
         for stmt in stmts {
             let decorator_list = match stmt {
@@ -481,14 +486,10 @@ impl FixtureDatabase {
             };
 
             for decorator in decorator_list {
-                let dec_start_line = content[..decorator.range().start().to_usize()]
-                    .matches('\n')
-                    .count()
-                    + 1;
-                let dec_end_line = content[..decorator.range().end().to_usize()]
-                    .matches('\n')
-                    .count()
-                    + 1;
+                let dec_start_line =
+                    self.get_line_from_offset(decorator.range().start().to_usize(), line_index);
+                let dec_end_line =
+                    self.get_line_from_offset(decorator.range().end().to_usize(), line_index);
 
                 if target_line >= dec_start_line && target_line <= dec_end_line {
                     if decorators::is_usefixtures_decorator(decorator) {
@@ -503,7 +504,7 @@ impl FixtureDatabase {
             // Recursively check class bodies
             if let Stmt::ClassDef(class_def) = stmt {
                 if let Some(ctx) =
-                    Self::check_decorator_context(&class_def.body, content, target_line)
+                    self.check_decorator_context(&class_def.body, _content, target_line, line_index)
                 {
                     return Some(ctx);
                 }
@@ -520,6 +521,7 @@ impl FixtureDatabase {
         content: &str,
         target_line: usize,
         target_char: usize,
+        line_index: &[usize],
     ) -> Option<CompletionContext> {
         for stmt in stmts {
             match stmt {
@@ -532,6 +534,7 @@ impl FixtureDatabase {
                         content,
                         target_line,
                         target_char,
+                        line_index,
                     ) {
                         return Some(ctx);
                     }
@@ -545,6 +548,7 @@ impl FixtureDatabase {
                         content,
                         target_line,
                         target_char,
+                        line_index,
                     ) {
                         return Some(ctx);
                     }
@@ -555,6 +559,7 @@ impl FixtureDatabase {
                         content,
                         target_line,
                         target_char,
+                        line_index,
                     ) {
                         return Some(ctx);
                     }
@@ -577,9 +582,10 @@ impl FixtureDatabase {
         content: &str,
         target_line: usize,
         _target_char: usize,
+        line_index: &[usize],
     ) -> Option<CompletionContext> {
-        let func_start_line = content[..range.start().to_usize()].matches('\n').count() + 1;
-        let func_end_line = content[..range.end().to_usize()].matches('\n').count() + 1;
+        let func_start_line = self.get_line_from_offset(range.start().to_usize(), line_index);
+        let func_end_line = self.get_line_from_offset(range.end().to_usize(), line_index);
 
         if target_line < func_start_line || target_line > func_end_line {
             return None;
@@ -706,10 +712,10 @@ impl FixtureDatabase {
 
         let target_line = (line + 1) as usize; // Convert to 1-based
 
-        // Parse the file
-        let parsed = parse(&content, Mode::Module, "").ok()?;
+        // Parse the file (using cached AST)
+        let parsed = self.get_parsed_ast(file_path, &content)?;
 
-        if let rustpython_parser::ast::Mod::Module(module) = parsed {
+        if let rustpython_parser::ast::Mod::Module(module) = parsed.as_ref() {
             return self.find_enclosing_function(
                 &module.body,
                 &content,

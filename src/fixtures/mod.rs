@@ -33,6 +33,10 @@ use tracing::debug;
 /// The content hash is used to invalidate the cache when file content changes.
 type LineIndexCacheEntry = (u64, Arc<Vec<usize>>);
 
+/// Cache entry for parsed AST: (content_hash, ast).
+/// The content hash is used to invalidate the cache when file content changes.
+type AstCacheEntry = (u64, Arc<rustpython_parser::ast::Mod>);
+
 /// The central database for fixture definitions and usages.
 ///
 /// Uses `DashMap` for lock-free concurrent access during workspace scanning.
@@ -56,6 +60,9 @@ pub struct FixtureDatabase {
     /// Cache of line indices (byte offsets) for files to avoid recomputation.
     /// Stores (content_hash, line_index) to invalidate when content changes.
     pub line_index_cache: Arc<DashMap<PathBuf, LineIndexCacheEntry>>,
+    /// Cache of parsed AST for files to avoid re-parsing.
+    /// Stores (content_hash, ast) to invalidate when content changes.
+    pub ast_cache: Arc<DashMap<PathBuf, AstCacheEntry>>,
 }
 
 impl Default for FixtureDatabase {
@@ -76,6 +83,7 @@ impl FixtureDatabase {
             imports: Arc::new(DashMap::new()),
             canonical_path_cache: Arc::new(DashMap::new()),
             line_index_cache: Arc::new(DashMap::new()),
+            ast_cache: Arc::new(DashMap::new()),
         }
     }
 
@@ -135,6 +143,37 @@ impl FixtureDatabase {
         arc_index
     }
 
+    /// Get or parse AST for a file, with content-hash-based caching.
+    /// Returns Arc to avoid cloning the potentially large AST.
+    /// The cache is invalidated when the content hash changes.
+    pub(crate) fn get_parsed_ast(
+        &self,
+        file_path: &Path,
+        content: &str,
+    ) -> Option<Arc<rustpython_parser::ast::Mod>> {
+        let content_hash = Self::hash_content(content);
+
+        // Check cache first - only use if content hash matches
+        if let Some(cached) = self.ast_cache.get(file_path) {
+            let (cached_hash, cached_ast) = cached.value();
+            if *cached_hash == content_hash {
+                return Some(Arc::clone(cached_ast));
+            }
+        }
+
+        // Parse the content
+        let parsed = rustpython_parser::parse(content, rustpython_parser::Mode::Module, "").ok()?;
+        let arc_ast = Arc::new(parsed);
+
+        // Store in cache with content hash
+        self.ast_cache.insert(
+            file_path.to_path_buf(),
+            (content_hash, Arc::clone(&arc_ast)),
+        );
+
+        Some(arc_ast)
+    }
+
     /// Compute a hash of the content for cache invalidation.
     fn hash_content(content: &str) -> u64 {
         let mut hasher = DefaultHasher::new();
@@ -154,6 +193,9 @@ impl FixtureDatabase {
 
         // Remove from line_index_cache
         self.line_index_cache.remove(&canonical);
+
+        // Remove from ast_cache
+        self.ast_cache.remove(&canonical);
 
         // Remove from file_cache
         self.file_cache.remove(&canonical);

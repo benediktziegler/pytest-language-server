@@ -63,8 +63,8 @@ impl Backend {
                             // Create a code action to add this fixture as a parameter
                             let function_line = Self::internal_line_to_lsp(fixture.function_line);
 
-                            // Read the file to determine where to insert the parameter
-                            if let Ok(content) = std::fs::read_to_string(&file_path) {
+                            // Get the file content from cache to determine where to insert the parameter
+                            if let Some(content) = self.fixture_db.get_file_content(&file_path) {
                                 let lines: Vec<&str> = content.lines().collect();
                                 // Use get() instead of direct indexing for safety
                                 if let Some(func_line_content) = lines.get(function_line as usize) {
