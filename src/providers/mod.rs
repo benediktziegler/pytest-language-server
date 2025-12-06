@@ -6,8 +6,10 @@ pub mod code_action;
 pub mod completion;
 pub mod definition;
 pub mod diagnostics;
+pub mod document_symbol;
 pub mod hover;
 pub mod references;
+pub mod workspace_symbol;
 
 use crate::fixtures::FixtureDatabase;
 use dashmap::DashMap;

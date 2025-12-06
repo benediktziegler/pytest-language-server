@@ -21,6 +21,8 @@ documentation, diagnostics, and more!
   - [Code Completion](#-code-completion)
   - [Find References](#-find-references)
   - [Hover Documentation](#-hover-documentation)
+  - [Document Symbols](#-document-symbols)
+  - [Workspace Symbols](#-workspace-symbols)
   - [Code Actions (Quick Fixes)](#-code-actions-quick-fixes)
   - [Diagnostics & Quick Fixes](#️-diagnostics--quick-fixes)
   - [Performance](#️-performance)
@@ -81,6 +83,20 @@ View fixture information on hover:
 - Source file location
 - Docstring (with proper formatting and dedenting)
 - Markdown support in docstrings
+
+### 📑 Document Symbols
+Navigate fixtures within a file using the document outline:
+- **File outline view**: See all fixtures defined in the current file (Cmd+Shift+O / Ctrl+Shift+O)
+- **Breadcrumb navigation**: Shows fixture hierarchy in editor breadcrumbs
+- **Return type display**: Shows fixture return types when available
+- **Sorted by position**: Fixtures appear in definition order
+
+### 🔎 Workspace Symbols
+Search for fixtures across your entire workspace:
+- **Global search**: Find any fixture by name (Cmd+T / Ctrl+T)
+- **Fuzzy matching**: Case-insensitive substring search
+- **File context**: Shows which file each fixture is defined in
+- **Fast lookup**: Instant results from in-memory fixture database
 
 ### 💡 Code Actions (Quick Fixes)
 One-click fixes for common pytest issues:

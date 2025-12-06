@@ -2319,3 +2319,322 @@ def local_fixture():
         "local_fixture should not be third-party"
     );
 }
+
+// =============================================================================
+// Document Symbol Tests
+// =============================================================================
+
+#[test]
+fn test_document_symbol_returns_fixtures_in_file() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def fixture_one():
+    """First fixture."""
+    return 1
+
+@pytest.fixture
+def fixture_two() -> str:
+    """Second fixture."""
+    return "two"
+
+def test_something(fixture_one, fixture_two):
+    pass
+"#;
+    let file_path = PathBuf::from("/tmp/project/conftest.py");
+    db.analyze_file(file_path.clone(), content);
+
+    // Verify fixtures were extracted
+    let fixture_one = db.definitions.get("fixture_one").unwrap();
+    assert_eq!(fixture_one.len(), 1);
+    assert_eq!(fixture_one[0].file_path, file_path);
+
+    let fixture_two = db.definitions.get("fixture_two").unwrap();
+    assert_eq!(fixture_two.len(), 1);
+    assert_eq!(fixture_two[0].file_path, file_path);
+    assert_eq!(fixture_two[0].return_type.as_deref(), Some("str"));
+}
+
+#[test]
+fn test_document_symbol_filters_by_file() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    // First file
+    let content1 = r#"
+import pytest
+
+@pytest.fixture
+def fixture_a():
+    pass
+"#;
+    let file1 = PathBuf::from("/tmp/project/conftest.py");
+    db.analyze_file(file1.clone(), content1);
+
+    // Second file
+    let content2 = r#"
+import pytest
+
+@pytest.fixture
+def fixture_b():
+    pass
+"#;
+    let file2 = PathBuf::from("/tmp/project/tests/conftest.py");
+    db.analyze_file(file2.clone(), content2);
+
+    // Collect fixtures for file1 only
+    let mut file1_fixtures: Vec<String> = Vec::new();
+    for entry in db.definitions.iter() {
+        for def in entry.value() {
+            if def.file_path == file1 && !def.is_third_party {
+                file1_fixtures.push(def.name.clone());
+            }
+        }
+    }
+
+    assert_eq!(file1_fixtures.len(), 1);
+    assert!(file1_fixtures.contains(&"fixture_a".to_string()));
+
+    // Collect fixtures for file2 only
+    let mut file2_fixtures: Vec<String> = Vec::new();
+    for entry in db.definitions.iter() {
+        for def in entry.value() {
+            if def.file_path == file2 && !def.is_third_party {
+                file2_fixtures.push(def.name.clone());
+            }
+        }
+    }
+
+    assert_eq!(file2_fixtures.len(), 1);
+    assert!(file2_fixtures.contains(&"fixture_b".to_string()));
+}
+
+#[test]
+fn test_document_symbol_excludes_third_party() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    // Third-party fixture
+    let tp_content = r#"
+import pytest
+
+@pytest.fixture
+def mocker():
+    pass
+"#;
+    let tp_path = PathBuf::from("/tmp/.venv/lib/python3.11/site-packages/pytest_mock/plugin.py");
+    db.analyze_file(tp_path.clone(), tp_content);
+
+    // Count non-third-party fixtures for this file
+    let mut count = 0;
+    for entry in db.definitions.iter() {
+        for def in entry.value() {
+            if def.file_path == tp_path && !def.is_third_party {
+                count += 1;
+            }
+        }
+    }
+
+    // Should be 0 because all fixtures in site-packages are third-party
+    assert_eq!(count, 0);
+}
+
+// =============================================================================
+// Workspace Symbol Tests
+// =============================================================================
+
+#[test]
+fn test_workspace_symbol_returns_all_fixtures() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    // Multiple files with fixtures
+    let content1 = r#"
+import pytest
+
+@pytest.fixture
+def alpha():
+    pass
+
+@pytest.fixture
+def beta():
+    pass
+"#;
+    db.analyze_file(PathBuf::from("/tmp/project/conftest.py"), content1);
+
+    let content2 = r#"
+import pytest
+
+@pytest.fixture
+def gamma():
+    pass
+"#;
+    db.analyze_file(PathBuf::from("/tmp/project/tests/conftest.py"), content2);
+
+    // Count total non-third-party fixtures
+    let mut all_fixtures: Vec<String> = Vec::new();
+    for entry in db.definitions.iter() {
+        for def in entry.value() {
+            if !def.is_third_party {
+                all_fixtures.push(def.name.clone());
+            }
+        }
+    }
+
+    assert_eq!(all_fixtures.len(), 3);
+    assert!(all_fixtures.contains(&"alpha".to_string()));
+    assert!(all_fixtures.contains(&"beta".to_string()));
+    assert!(all_fixtures.contains(&"gamma".to_string()));
+}
+
+#[test]
+fn test_workspace_symbol_filters_by_query() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def database_connection():
+    pass
+
+@pytest.fixture
+def database_transaction():
+    pass
+
+@pytest.fixture
+def http_client():
+    pass
+"#;
+    db.analyze_file(PathBuf::from("/tmp/project/conftest.py"), content);
+
+    // Simulate query filtering
+    let query = "database".to_lowercase();
+    let mut matching: Vec<String> = Vec::new();
+    for entry in db.definitions.iter() {
+        for def in entry.value() {
+            if !def.is_third_party && def.name.to_lowercase().contains(&query) {
+                matching.push(def.name.clone());
+            }
+        }
+    }
+
+    assert_eq!(matching.len(), 2);
+    assert!(matching.contains(&"database_connection".to_string()));
+    assert!(matching.contains(&"database_transaction".to_string()));
+}
+
+#[test]
+fn test_workspace_symbol_empty_query_returns_all() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def one():
+    pass
+
+@pytest.fixture
+def two():
+    pass
+"#;
+    db.analyze_file(PathBuf::from("/tmp/project/conftest.py"), content);
+
+    // Empty query should return all non-third-party fixtures
+    let mut matching: Vec<String> = Vec::new();
+    for entry in db.definitions.iter() {
+        for def in entry.value() {
+            if !def.is_third_party {
+                matching.push(def.name.clone());
+            }
+        }
+    }
+
+    assert_eq!(matching.len(), 2);
+}
+
+#[test]
+fn test_workspace_symbol_excludes_third_party() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    // Local fixture
+    let local_content = r#"
+import pytest
+
+@pytest.fixture
+def my_local():
+    pass
+"#;
+    db.analyze_file(PathBuf::from("/tmp/project/conftest.py"), local_content);
+
+    // Third-party fixture
+    let tp_content = r#"
+import pytest
+
+@pytest.fixture
+def mocker():
+    pass
+"#;
+    db.analyze_file(
+        PathBuf::from("/tmp/.venv/lib/python3.11/site-packages/pytest_mock/plugin.py"),
+        tp_content,
+    );
+
+    // Only local fixtures should be returned
+    let mut matching: Vec<String> = Vec::new();
+    for entry in db.definitions.iter() {
+        for def in entry.value() {
+            if !def.is_third_party {
+                matching.push(def.name.clone());
+            }
+        }
+    }
+
+    assert_eq!(matching.len(), 1);
+    assert_eq!(matching[0], "my_local");
+}
+
+#[test]
+fn test_workspace_symbol_case_insensitive_query() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def MyMixedCaseFixture():
+    pass
+"#;
+    db.analyze_file(PathBuf::from("/tmp/project/conftest.py"), content);
+
+    // Query with different case
+    let query = "mymixed".to_lowercase();
+    let mut matching: Vec<String> = Vec::new();
+    for entry in db.definitions.iter() {
+        for def in entry.value() {
+            if !def.is_third_party && def.name.to_lowercase().contains(&query) {
+                matching.push(def.name.clone());
+            }
+        }
+    }
+
+    assert_eq!(matching.len(), 1);
+    assert_eq!(matching[0], "MyMixedCaseFixture");
+}

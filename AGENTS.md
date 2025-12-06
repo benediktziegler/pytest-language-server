@@ -24,7 +24,7 @@ This ensures the user maintains full control over their git workflow.
 - **Language**: Rust (Edition 2021, MSRV 1.83)
 - **Lines of Code**: ~4,100 lines across modular structure
 - **Architecture**: Async LSP server using tower-lsp with CLI support via clap
-- **Key Features**: Fixture go-to-definition, find-references, hover docs, **code completion**, fixture overriding, undeclared fixture diagnostics, CLI commands, `@pytest.mark.usefixtures` support, `@pytest.mark.parametrize` indirect fixtures
+- **Key Features**: Fixture go-to-definition, find-references, hover docs, **code completion**, **document symbols**, **workspace symbols**, fixture overriding, undeclared fixture diagnostics, CLI commands, `@pytest.mark.usefixtures` support, `@pytest.mark.parametrize` indirect fixtures
 
 ## Core Architecture
 

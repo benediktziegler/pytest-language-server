@@ -114,6 +114,8 @@ impl LanguageServer for Backend {
                     },
                     completion_item: None,
                 }),
+                document_symbol_provider: Some(OneOf::Left(true)),
+                workspace_symbol_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
         })
@@ -179,6 +181,20 @@ impl LanguageServer for Backend {
 
     async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
         self.handle_code_action(params).await
+    }
+
+    async fn document_symbol(
+        &self,
+        params: DocumentSymbolParams,
+    ) -> Result<Option<DocumentSymbolResponse>> {
+        self.handle_document_symbol(params).await
+    }
+
+    async fn symbol(
+        &self,
+        params: WorkspaceSymbolParams,
+    ) -> Result<Option<Vec<SymbolInformation>>> {
+        self.handle_workspace_symbol(params).await
     }
 
     async fn shutdown(&self) -> Result<()> {
