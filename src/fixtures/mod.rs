@@ -137,4 +137,30 @@ impl FixtureDatabase {
         content.hash(&mut hasher);
         hasher.finish()
     }
+
+    /// Remove all cached data for a file.
+    /// Called when a file is closed or deleted to prevent unbounded cache growth.
+    pub fn cleanup_file_cache(&self, file_path: &Path) {
+        // Use canonical path for consistent cleanup
+        let canonical = file_path
+            .canonicalize()
+            .unwrap_or_else(|_| file_path.to_path_buf());
+
+        debug!("Cleaning up cache for file: {:?}", canonical);
+
+        // Remove from line_index_cache
+        self.line_index_cache.remove(&canonical);
+
+        // Remove from file_cache
+        self.file_cache.remove(&canonical);
+
+        // Note: We don't remove from canonical_path_cache because:
+        // 1. It's keyed by original path, not canonical path
+        // 2. Path->canonical mappings are stable and small
+        // 3. They may be needed again if file is reopened
+
+        // Note: We don't remove definitions/usages here because:
+        // 1. They might be needed for cross-file references
+        // 2. They're cleaned up on next analyze_file call anyway
+    }
 }

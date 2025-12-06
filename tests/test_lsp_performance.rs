@@ -423,3 +423,69 @@ def fixture_{}():
         assert!(db.definitions.contains_key(&format!("fixture_{}", i)));
     }
 }
+
+#[test]
+fn test_cleanup_file_cache_removes_cached_data() {
+    // Test that cleanup_file_cache properly removes line_index_cache and file_cache entries
+    let temp_dir = TempDir::new().unwrap();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return 42
+
+def test_one(my_fixture):
+    assert my_fixture == 42
+"#;
+
+    let file_path = create_temp_test_file(&temp_dir, "test_cleanup.py", content);
+    let canonical_path = file_path.canonicalize().unwrap();
+
+    let db = FixtureDatabase::new();
+
+    // Analyze file to populate caches
+    db.analyze_file(file_path.clone(), content);
+
+    // Verify caches are populated
+    assert!(
+        db.line_index_cache.contains_key(&canonical_path),
+        "line_index_cache should contain the file"
+    );
+    assert!(
+        db.file_cache.contains_key(&canonical_path),
+        "file_cache should contain the file"
+    );
+
+    // Clean up caches for the file
+    db.cleanup_file_cache(&file_path);
+
+    // Verify caches are cleared
+    assert!(
+        !db.line_index_cache.contains_key(&canonical_path),
+        "line_index_cache should be empty after cleanup"
+    );
+    assert!(
+        !db.file_cache.contains_key(&canonical_path),
+        "file_cache should be empty after cleanup"
+    );
+
+    // Definitions and usages should still be present (they're cleaned on next analyze)
+    assert!(db.definitions.contains_key("my_fixture"));
+    assert!(db.usages.contains_key(&canonical_path));
+}
+
+#[test]
+fn test_cleanup_file_cache_handles_nonexistent_file() {
+    // Test that cleanup_file_cache gracefully handles files that were never analyzed
+    let db = FixtureDatabase::new();
+
+    // Should not panic when cleaning up a file that doesn't exist in cache
+    let fake_path = PathBuf::from("/nonexistent/path/test.py");
+    db.cleanup_file_cache(&fake_path);
+
+    // Database should remain functional
+    assert!(db.definitions.is_empty());
+    assert!(db.line_index_cache.is_empty());
+}
