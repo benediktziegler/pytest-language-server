@@ -23,6 +23,7 @@ documentation, diagnostics, and more!
   - [Hover Documentation](#-hover-documentation)
   - [Document Symbols](#-document-symbols)
   - [Workspace Symbols](#-workspace-symbols)
+  - [Code Lens](#-code-lens)
   - [Code Actions (Quick Fixes)](#-code-actions-quick-fixes)
   - [Diagnostics & Quick Fixes](#️-diagnostics--quick-fixes)
   - [Performance](#️-performance)
@@ -97,6 +98,13 @@ Search for fixtures across your entire workspace:
 - **Fuzzy matching**: Case-insensitive substring search
 - **File context**: Shows which file each fixture is defined in
 - **Fast lookup**: Instant results from in-memory fixture database
+
+### 🔢 Code Lens
+See fixture usage counts directly in your editor:
+- **Usage count**: Shows "N usages" above each fixture definition
+- **Click to navigate**: Clicking the lens shows all references (find-references integration)
+- **Real-time updates**: Counts update as you add/remove fixture usages
+- **Local fixtures only**: Only shows lenses for project fixtures, not third-party
 
 ### 💡 Code Actions (Quick Fixes)
 One-click fixes for common pytest issues:

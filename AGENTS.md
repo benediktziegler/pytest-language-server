@@ -24,7 +24,7 @@ This ensures the user maintains full control over their git workflow.
 - **Language**: Rust (Edition 2021, MSRV 1.83)
 - **Lines of Code**: ~4,100 lines across modular structure
 - **Architecture**: Async LSP server using tower-lsp with CLI support via clap
-- **Key Features**: Fixture go-to-definition, find-references, hover docs, **code completion**, **document symbols**, **workspace symbols**, fixture overriding, undeclared fixture diagnostics, CLI commands, `@pytest.mark.usefixtures` support, `@pytest.mark.parametrize` indirect fixtures
+- **Key Features**: Fixture go-to-definition, find-references, hover docs, **code completion**, **document symbols**, **workspace symbols**, **code lens**, fixture overriding, undeclared fixture diagnostics, CLI commands, `@pytest.mark.usefixtures` support, `@pytest.mark.parametrize` indirect fixtures
 
 ## Core Architecture
 
@@ -50,7 +50,8 @@ src/
     ├── hover.rs        # Hover documentation (~55 lines)
     ├── completion.rs   # Code completion (~219 lines)
     ├── diagnostics.rs  # Publish diagnostics (~44 lines)
-    └── code_action.rs  # Quick fixes (~171 lines)
+    ├── code_action.rs  # Quick fixes (~171 lines)
+    └── code_lens.rs    # Usage count lenses (~65 lines)
 ```
 
 ### Key Components
@@ -77,6 +78,7 @@ src/
      - `completion.rs` - Code completion with auto-add parameter support
      - `diagnostics.rs` - Undeclared fixture warnings
      - `code_action.rs` - Quick fixes to add missing parameters
+     - `code_lens.rs` - Usage count lenses above fixtures
 
 3. **Main** (`src/main.rs`)
    - `LanguageServer` trait implementation delegating to providers
@@ -217,6 +219,7 @@ This is handled by `start_char` and `end_char` in `FixtureUsage`.
 - `handle_hover()` (hover.rs) - Shows fixture signature and docstring in Markdown
 - `handle_completion()` (completion.rs) - Context-aware fixture completions
 - `handle_code_action()` (code_action.rs) - Quick fixes to add missing parameters
+- `handle_code_lens()` (code_lens.rs) - Shows "N usages" above fixture definitions
 - `publish_diagnostics_for_file()` (diagnostics.rs) - Publishes undeclared fixture warnings
 
 **Helper Methods (mod.rs):**

@@ -2638,3 +2638,188 @@ def MyMixedCaseFixture():
     assert_eq!(matching.len(), 1);
     assert_eq!(matching[0], "MyMixedCaseFixture");
 }
+
+// ============================================================================
+// Code Lens Tests
+// ============================================================================
+
+#[test]
+fn test_code_lens_shows_usage_count() {
+    use pytest_language_server::FixtureDatabase;
+    use std::path::PathBuf;
+
+    let db = FixtureDatabase::new();
+    let file_path = PathBuf::from("/tmp/test_project/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def shared_fixture():
+    """A fixture used by multiple tests."""
+    return "shared"
+"#;
+    db.analyze_file(file_path.clone(), conftest_content);
+
+    let test_content = r#"
+def test_one(shared_fixture):
+    pass
+
+def test_two(shared_fixture):
+    pass
+
+def test_three(shared_fixture):
+    pass
+"#;
+    db.analyze_file(
+        PathBuf::from("/tmp/test_project/test_example.py"),
+        test_content,
+    );
+
+    // Get definitions and count references
+    let definitions = db.definitions.get("shared_fixture").unwrap();
+    let def = &definitions[0];
+    let references = db.find_references_for_definition(def);
+
+    // Should have 3 usages
+    assert_eq!(references.len(), 3);
+}
+
+#[test]
+fn test_code_lens_excludes_third_party_fixtures() {
+    use pytest_language_server::FixtureDatabase;
+    use std::path::PathBuf;
+
+    let db = FixtureDatabase::new();
+
+    // Third-party fixture
+    let tp_content = r#"
+import pytest
+
+@pytest.fixture
+def mocker():
+    pass
+"#;
+    db.analyze_file(
+        PathBuf::from("/tmp/.venv/lib/python3.11/site-packages/pytest_mock/plugin.py"),
+        tp_content,
+    );
+
+    // Local fixture
+    let local_content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    pass
+"#;
+    let local_path = PathBuf::from("/tmp/test_project/conftest.py");
+    db.analyze_file(local_path.clone(), local_content);
+
+    // Count fixtures in local file that are not third-party
+    let mut local_fixture_count = 0;
+    for entry in db.definitions.iter() {
+        for def in entry.value() {
+            if def.file_path == local_path && !def.is_third_party {
+                local_fixture_count += 1;
+            }
+        }
+    }
+
+    assert_eq!(local_fixture_count, 1);
+}
+
+#[test]
+fn test_code_lens_zero_usages() {
+    use pytest_language_server::FixtureDatabase;
+    use std::path::PathBuf;
+
+    let db = FixtureDatabase::new();
+    let file_path = PathBuf::from("/tmp/test_project/conftest.py");
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def unused_fixture():
+    """This fixture is never used."""
+    return "unused"
+"#;
+    db.analyze_file(file_path.clone(), content);
+
+    // Get definitions and count references
+    let definitions = db.definitions.get("unused_fixture").unwrap();
+    let def = &definitions[0];
+    let references = db.find_references_for_definition(def);
+
+    // Should have 0 usages
+    assert_eq!(references.len(), 0);
+}
+
+#[test]
+fn test_code_lens_fixture_used_by_other_fixture() {
+    use pytest_language_server::FixtureDatabase;
+    use std::path::PathBuf;
+
+    let db = FixtureDatabase::new();
+    let file_path = PathBuf::from("/tmp/test_project/conftest.py");
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def base_fixture():
+    return "base"
+
+@pytest.fixture
+def derived_fixture(base_fixture):
+    return base_fixture + "_derived"
+"#;
+    db.analyze_file(file_path.clone(), content);
+
+    // Get base_fixture definitions and count references
+    let definitions = db.definitions.get("base_fixture").unwrap();
+    let def = &definitions[0];
+    let references = db.find_references_for_definition(def);
+
+    // Should have 1 usage (in derived_fixture)
+    assert_eq!(references.len(), 1);
+}
+
+#[test]
+fn test_code_lens_multiple_fixtures_in_file() {
+    use pytest_language_server::FixtureDatabase;
+    use std::path::PathBuf;
+
+    let db = FixtureDatabase::new();
+    let file_path = PathBuf::from("/tmp/test_project/conftest.py");
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def fixture_a():
+    return "a"
+
+@pytest.fixture
+def fixture_b():
+    return "b"
+
+@pytest.fixture
+def fixture_c():
+    return "c"
+"#;
+    db.analyze_file(file_path.clone(), content);
+
+    // Count fixtures in this file
+    let mut fixture_count = 0;
+    for entry in db.definitions.iter() {
+        for def in entry.value() {
+            if def.file_path == file_path && !def.is_third_party {
+                fixture_count += 1;
+            }
+        }
+    }
+
+    assert_eq!(fixture_count, 3);
+}
