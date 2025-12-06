@@ -278,13 +278,13 @@ RUST_LOG=debug cargo test          # Run with debug logging
 
 ### Test Coverage
 
-- **322 total tests passing** (as of latest)
+- **332 total tests passing** (as of latest)
   - 218 integration tests in `tests/test_fixtures.rs` (FixtureDatabase API)
-  - 46 integration tests in `tests/test_lsp.rs` (LSP protocol handlers)
+  - 59 integration tests in `tests/test_lsp.rs` (LSP protocol handlers)
   - 32 integration tests in `tests/test_e2e.rs` (End-to-end CLI and workspace tests)
   - 9 unit tests in `tests/test_decorators.rs` (Decorator utilities)
-  - 7 tests in `tests/test_lsp_performance.rs` (Performance and caching)
-  - 10 embedded unit tests in `src/fixtures/` modules
+  - 9 tests in `tests/test_lsp_performance.rs` (Performance and caching)
+  - 5 embedded unit tests in `src/fixtures/string_utils.rs`
 
 **Key test areas:**
 
@@ -473,7 +473,7 @@ Install with: `pre-commit install`
    - `find_references_for_definition()` for find-references
 2. Edit `src/fixtures/analyzer.rs` if changing what fixtures are detected
 3. Add test cases to `tests/test_fixtures.rs`
-4. Run `cargo test` to ensure all 322 tests pass
+4. Run `cargo test` to ensure all 332 tests pass
 5. Consider edge cases: self-referencing fixtures, multiline signatures, conftest.py hierarchy
 
 ### Debugging LSP Issues
@@ -612,7 +612,7 @@ Critical LSP specification requirements:
 ## Troubleshooting
 
 ### Tests failing after fixture logic changes
-- Check that all 322 tests pass: `cargo test`
+- Check that all 332 tests pass: `cargo test`
 - Focus on failing tests in `fixtures/` modules (fixture resolution) or `providers/` (LSP handlers)
 - Common issue: fixture priority rules not respecting conftest.py hierarchy
 
@@ -691,7 +691,7 @@ The project includes extensions for three major editors/IDEs:
   - Consistent documentation format between hover and completions
   - Added `is_third_party` field to `FixtureDefinition` for performance optimization
   - Extracted `is_pytest_mark_decorator` helper in decorators.rs for DRY improvement
-  - Test suite: 322 tests (218 unit + 46 LSP + 32 E2E + 9 decorators + 7 performance)
+  - Test suite: 332 tests (218 fixtures + 59 LSP + 32 E2E + 9 decorators + 9 performance + 5 string_utils)
 - **v0.11.2** (December 2025)
   - Fixed fixture scoping: sibling test files no longer incorrectly share fixtures (#23)
   - Usage counting now uses per-definition scoped counting instead of global name counting
