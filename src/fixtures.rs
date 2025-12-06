@@ -12,6 +12,8 @@ pub struct FixtureDefinition {
     pub name: String,
     pub file_path: PathBuf,
     pub line: usize,
+    pub start_char: usize, // Character position where the fixture name starts (on the line)
+    pub end_char: usize,   // Character position where the fixture name ends (on the line)
     pub docstring: Option<String>,
     pub return_type: Option<String>, // The return type annotation (for generators, the yielded type)
 }
@@ -34,6 +36,37 @@ pub struct UndeclaredFixture {
     pub end_char: usize,
     pub function_name: String, // Name of the test/fixture function where this is used
     pub function_line: usize,  // Line where the function is defined
+}
+
+/// Represents a location where a fixture can be renamed
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenameLocation {
+    pub file_path: PathBuf,
+    pub line: usize,
+    pub start_char: usize,
+    pub end_char: usize,
+}
+
+/// Result of collecting rename locations for a fixture
+#[derive(Debug, Clone)]
+pub struct RenameInfo {
+    /// The fixture definition being renamed
+    pub definition: FixtureDefinition,
+    /// All locations where the fixture name appears (definition + usages)
+    pub locations: Vec<RenameLocation>,
+}
+
+/// Error type for rename operations
+#[derive(Debug, Clone, PartialEq)]
+pub enum RenameError {
+    /// No fixture found at the specified position
+    NoFixtureAtPosition,
+    /// Cannot rename built-in fixtures (request, tmp_path, etc.)
+    CannotRenameBuiltin(String),
+    /// Cannot rename third-party fixtures (from site-packages)
+    CannotRenameThirdParty(String),
+    /// Invalid new name (not a valid Python identifier)
+    InvalidName(String),
 }
 
 #[derive(Debug)]
@@ -786,10 +819,17 @@ impl FixtureDatabase {
                 debug!("  Return type: {}", ret_type);
             }
 
+            // Calculate character positions for the fixture name
+            // For renamed fixtures, use the function name position (since that's what gets renamed)
+            // The fixture_name might differ from func_name if name= parameter was used
+            let (start_char, end_char) = self.find_function_name_position(content, line, func_name);
+
             let definition = FixtureDefinition {
                 name: fixture_name.clone(),
                 file_path: file_path.clone(),
                 line,
+                start_char,
+                end_char,
                 docstring,
                 return_type,
             };
@@ -945,9 +985,19 @@ impl FixtureDatabase {
                             let line = self
                                 .get_line_from_offset(assign.range.start().to_usize(), line_index);
 
+                            // Get character positions from the name expression's range
+                            let start_char = self.get_char_position_from_offset(
+                                name.range.start().to_usize(),
+                                line_index,
+                            );
+                            let end_char = self.get_char_position_from_offset(
+                                name.range.end().to_usize(),
+                                line_index,
+                            );
+
                             info!(
-                                "Found fixture assignment: {} at {:?}:{}",
-                                fixture_name, file_path, line
+                                "Found fixture assignment: {} at {:?}:{}:{}-{}",
+                                fixture_name, file_path, line, start_char, end_char
                             );
 
                             // We don't have a docstring or return type for assignment-style fixtures
@@ -955,6 +1005,8 @@ impl FixtureDatabase {
                                 name: fixture_name.to_string(),
                                 file_path: file_path.clone(),
                                 line,
+                                start_char,
+                                end_char,
                                 docstring: None,
                                 return_type: None,
                             };
@@ -2173,6 +2225,33 @@ impl FixtureDatabase {
         offset.saturating_sub(line_start)
     }
 
+    /// Find the character position of a function name in a line
+    /// Handles both "def func_name(" and "async def func_name(" patterns
+    /// Returns (start_char, end_char) tuple
+    fn find_function_name_position(
+        &self,
+        content: &str,
+        line: usize,
+        func_name: &str,
+    ) -> (usize, usize) {
+        // Get the line content
+        if let Some(line_content) = content.lines().nth(line.saturating_sub(1)) {
+            // Look for the function name after "def " or "async def "
+            // The pattern should be: (async )?def func_name(
+            if let Some(def_pos) = line_content.find("def ") {
+                let search_start = def_pos + 4; // Skip "def "
+                if let Some(name_start) = line_content[search_start..].find(func_name) {
+                    let start_char = search_start + name_start;
+                    let end_char = start_char + func_name.len();
+                    return (start_char, end_char);
+                }
+            }
+        }
+
+        // Fallback: return 0, func_name.len() if we can't find it
+        (0, func_name.len())
+    }
+
     /// Find fixture definition for a given position in a file
     pub fn find_fixture_definition(
         &self,
@@ -2690,6 +2769,205 @@ impl FixtureDatabase {
             matching_references.len()
         );
         matching_references
+    }
+
+    /// List of built-in pytest fixtures that cannot be renamed
+    const BUILTIN_FIXTURES: &'static [&'static str] = &[
+        "request",
+        "tmp_path",
+        "tmp_path_factory",
+        "tmpdir",
+        "tmpdir_factory",
+        "cache",
+        "capsys",
+        "capsysbinary",
+        "capfd",
+        "capfdbinary",
+        "caplog",
+        "doctest_namespace",
+        "pytestconfig",
+        "record_property",
+        "record_testsuite_property",
+        "record_xml_attribute",
+        "recwarn",
+        "monkeypatch",
+        "pytester",
+        "testdir",
+    ];
+
+    /// Check if a fixture name is a built-in pytest fixture
+    pub fn is_builtin_fixture(name: &str) -> bool {
+        Self::BUILTIN_FIXTURES.contains(&name)
+    }
+
+    /// Check if a fixture definition is from a third-party package (site-packages)
+    pub fn is_third_party_fixture(definition: &FixtureDefinition) -> bool {
+        definition
+            .file_path
+            .to_string_lossy()
+            .contains("site-packages")
+    }
+
+    /// Validate that a name is a valid Python identifier
+    pub fn is_valid_python_identifier(name: &str) -> bool {
+        if name.is_empty() {
+            return false;
+        }
+
+        // Python identifier rules:
+        // - First character must be a letter or underscore
+        // - Remaining characters can be letters, digits, or underscores
+        // - Cannot be a Python keyword
+        let mut chars = name.chars();
+        let first = chars.next().unwrap();
+        if !first.is_alphabetic() && first != '_' {
+            return false;
+        }
+        for c in chars {
+            if !c.is_alphanumeric() && c != '_' {
+                return false;
+            }
+        }
+
+        // Check against Python keywords
+        const PYTHON_KEYWORDS: &[&str] = &[
+            "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class",
+            "continue", "def", "del", "elif", "else", "except", "finally", "for", "from", "global",
+            "if", "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise",
+            "return", "try", "while", "with", "yield",
+        ];
+        !PYTHON_KEYWORDS.contains(&name)
+    }
+
+    /// Collect all locations where a fixture needs to be renamed
+    /// This includes the definition and all usages that resolve to it
+    ///
+    /// Returns an error if:
+    /// - No fixture is found at the cursor position
+    /// - The fixture is a built-in fixture (request, tmp_path, etc.)
+    /// - The fixture is from a third-party package (site-packages)
+    pub fn collect_rename_locations(
+        &self,
+        file_path: &Path,
+        line: u32,
+        character: u32,
+    ) -> Result<RenameInfo, RenameError> {
+        info!(
+            "collect_rename_locations: file={:?}, line={}, char={}",
+            file_path, line, character
+        );
+
+        let target_line = (line + 1) as usize; // Convert from 0-based to 1-based
+
+        // First, find the fixture at the cursor position
+        let fixture_name = self
+            .find_fixture_at_position(file_path, line, character)
+            .ok_or(RenameError::NoFixtureAtPosition)?;
+
+        info!("Found fixture at cursor: {}", fixture_name);
+
+        // Check if it's a built-in fixture
+        if Self::is_builtin_fixture(&fixture_name) {
+            return Err(RenameError::CannotRenameBuiltin(fixture_name));
+        }
+
+        // Find the definition for this fixture
+        let definition = self
+            .find_fixture_definition(file_path, line, character)
+            .or_else(|| {
+                // If cursor is on a definition line itself, get that definition
+                self.get_definition_at_line(file_path, target_line, &fixture_name)
+            })
+            .ok_or(RenameError::NoFixtureAtPosition)?;
+
+        info!(
+            "Found definition: {} at {:?}:{}",
+            definition.name, definition.file_path, definition.line
+        );
+
+        // Check if it's a third-party fixture
+        if Self::is_third_party_fixture(&definition) {
+            return Err(RenameError::CannotRenameThirdParty(fixture_name));
+        }
+
+        // Collect all locations
+        let mut locations = Vec::new();
+
+        // Add the definition location
+        locations.push(RenameLocation {
+            file_path: definition.file_path.clone(),
+            line: definition.line,
+            start_char: definition.start_char,
+            end_char: definition.end_char,
+        });
+
+        // Add all usage locations that resolve to this definition
+        let references = self.find_references_for_definition(&definition);
+        for usage in references {
+            // Skip usages on the same line as the definition (already added above)
+            if usage.file_path == definition.file_path && usage.line == definition.line {
+                continue;
+            }
+            locations.push(RenameLocation {
+                file_path: usage.file_path.clone(),
+                line: usage.line,
+                start_char: usage.start_char,
+                end_char: usage.end_char,
+            });
+        }
+
+        info!(
+            "Collected {} rename locations for fixture {}",
+            locations.len(),
+            fixture_name
+        );
+
+        Ok(RenameInfo {
+            definition,
+            locations,
+        })
+    }
+
+    /// Get the current fixture name and its range at a cursor position
+    /// Used for prepare_rename to show the current name and range to the user
+    pub fn get_fixture_range_at_position(
+        &self,
+        file_path: &Path,
+        line: u32,
+        character: u32,
+    ) -> Option<(String, usize, usize, usize)> {
+        let target_line = (line + 1) as usize; // Convert from 0-based to 1-based
+
+        // Check if cursor is on a fixture usage
+        if let Some(usages) = self.usages.get(file_path) {
+            for usage in usages.iter() {
+                if usage.line == target_line {
+                    let cursor_pos = character as usize;
+                    if cursor_pos >= usage.start_char && cursor_pos < usage.end_char {
+                        return Some((
+                            usage.name.clone(),
+                            usage.line,
+                            usage.start_char,
+                            usage.end_char,
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Check if cursor is on a fixture definition
+        for entry in self.definitions.iter() {
+            for def in entry.value().iter() {
+                if def.file_path == file_path && def.line == target_line {
+                    let cursor_pos = character as usize;
+                    if cursor_pos >= def.start_char && cursor_pos < def.end_char {
+                        return Some((def.name.clone(), def.line, def.start_char, def.end_char));
+                    }
+                }
+            }
+        }
+
+        None
     }
 
     /// Get all undeclared fixture usages for a file

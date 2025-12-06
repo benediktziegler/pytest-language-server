@@ -20,6 +20,7 @@ documentation, diagnostics, and more!
   - [Go to Definition](#-go-to-definition)
   - [Code Completion](#-code-completion)
   - [Find References](#-find-references)
+  - [Rename Symbol](#-rename-symbol)
   - [Hover Documentation](#-hover-documentation)
   - [Code Actions (Quick Fixes)](#-code-actions-quick-fixes)
   - [Diagnostics & Quick Fixes](#️-diagnostics--quick-fixes)
@@ -74,6 +75,30 @@ Find all usages of a fixture across your entire test suite:
 - Shows references in all test files
 - Correctly handles fixture overriding and hierarchies
 - **LSP spec compliant**: Always includes the current position in results
+
+### ✏️ Rename Symbol
+Rename fixtures across your entire codebase with a single command:
+- **Scope-aware**: Only renames usages that resolve to the specific fixture being renamed
+- **Hierarchy-respecting**: Correctly handles fixture overrides (renaming a child doesn't affect parent)
+- **Works everywhere**: Rename from definition or any usage site
+- **Validates names**: Ensures new names are valid Python identifiers
+- **Safe guards**: Prevents renaming built-in fixtures (request, tmp_path, etc.) and third-party fixtures
+
+Example:
+```python
+# Before: Renaming 'user_db' to 'database'
+
+# conftest.py
+@pytest.fixture
+def user_db():  # <- Rename here
+    return Database()
+
+# test_users.py
+def test_get_user(user_db):  # <- Also renamed
+    assert user_db.get(1).name == "Alice"
+
+# After: Both definition and all usages are renamed to 'database'
+```
 
 ### 📚 Hover Documentation
 View fixture information on hover:

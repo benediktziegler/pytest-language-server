@@ -112,6 +112,12 @@ impl LanguageServer for Backend {
                     },
                     completion_item: None,
                 }),
+                rename_provider: Some(OneOf::Right(RenameOptions {
+                    prepare_provider: Some(true),
+                    work_done_progress_options: WorkDoneProgressOptions {
+                        work_done_progress: None,
+                    },
+                })),
                 ..Default::default()
             },
         })
@@ -700,6 +706,162 @@ impl LanguageServer for Backend {
         }
 
         info!("Returning None for code_action request");
+        Ok(None)
+    }
+
+    async fn prepare_rename(
+        &self,
+        params: TextDocumentPositionParams,
+    ) -> Result<Option<PrepareRenameResponse>> {
+        let uri = params.text_document.uri;
+        let position = params.position;
+
+        info!(
+            "prepare_rename request: uri={:?}, line={}, char={}",
+            uri, position.line, position.character
+        );
+
+        if let Some(file_path) = self.uri_to_path(&uri) {
+            // Get the fixture range at the cursor position
+            if let Some((name, line, start_char, end_char)) = self
+                .fixture_db
+                .get_fixture_range_at_position(&file_path, position.line, position.character)
+            {
+                info!(
+                    "Found fixture for rename: {} at line {} chars {}-{}",
+                    name, line, start_char, end_char
+                );
+
+                // Check if this is a renameable fixture (not builtin or third-party)
+                use pytest_language_server::FixtureDatabase;
+                if FixtureDatabase::is_builtin_fixture(&name) {
+                    info!("Cannot rename built-in fixture: {}", name);
+                    return Ok(None);
+                }
+
+                // Try to collect rename locations to verify it's renameable
+                let result = self.fixture_db.collect_rename_locations(
+                    &file_path,
+                    position.line,
+                    position.character,
+                );
+
+                if result.is_err() {
+                    info!("Cannot rename: {:?}", result.err());
+                    return Ok(None);
+                }
+
+                let lsp_line = Self::internal_line_to_lsp(line);
+                let range =
+                    Self::create_range(lsp_line, start_char as u32, lsp_line, end_char as u32);
+
+                return Ok(Some(PrepareRenameResponse::RangeWithPlaceholder {
+                    range,
+                    placeholder: name,
+                }));
+            }
+        }
+
+        info!("No fixture found for prepare_rename");
+        Ok(None)
+    }
+
+    async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        let uri = params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+        let new_name = params.new_name;
+
+        info!(
+            "rename request: uri={:?}, line={}, char={}, new_name={}",
+            uri, position.line, position.character, new_name
+        );
+
+        // Validate the new name
+        use pytest_language_server::FixtureDatabase;
+        if !FixtureDatabase::is_valid_python_identifier(&new_name) {
+            error!("Invalid Python identifier: {}", new_name);
+            return Err(tower_lsp::jsonrpc::Error::invalid_params(format!(
+                "'{}' is not a valid Python identifier",
+                new_name
+            )));
+        }
+
+        if let Some(file_path) = self.uri_to_path(&uri) {
+            // Collect all rename locations
+            let result = self.fixture_db.collect_rename_locations(
+                &file_path,
+                position.line,
+                position.character,
+            );
+
+            match result {
+                Ok(rename_info) => {
+                    info!(
+                        "Collected {} rename locations for fixture {}",
+                        rename_info.locations.len(),
+                        rename_info.definition.name
+                    );
+
+                    // Build WorkspaceEdit with changes grouped by file
+                    let mut changes: std::collections::HashMap<Url, Vec<TextEdit>> =
+                        std::collections::HashMap::new();
+
+                    for location in &rename_info.locations {
+                        let Some(loc_uri) = self.path_to_uri(&location.file_path) else {
+                            warn!("Failed to convert path to URI: {:?}", location.file_path);
+                            continue;
+                        };
+
+                        let lsp_line = Self::internal_line_to_lsp(location.line);
+                        let range = Self::create_range(
+                            lsp_line,
+                            location.start_char as u32,
+                            lsp_line,
+                            location.end_char as u32,
+                        );
+
+                        let text_edit = TextEdit {
+                            range,
+                            new_text: new_name.clone(),
+                        };
+
+                        changes.entry(loc_uri).or_default().push(text_edit);
+                    }
+
+                    info!(
+                        "Created WorkspaceEdit with changes in {} files",
+                        changes.len()
+                    );
+
+                    return Ok(Some(WorkspaceEdit {
+                        changes: Some(changes),
+                        document_changes: None,
+                        change_annotations: None,
+                    }));
+                }
+                Err(e) => {
+                    use pytest_language_server::RenameError;
+                    let error_msg = match e {
+                        RenameError::NoFixtureAtPosition => {
+                            "No fixture found at cursor position".to_string()
+                        }
+                        RenameError::CannotRenameBuiltin(name) => {
+                            format!("Cannot rename built-in fixture '{}'", name)
+                        }
+                        RenameError::CannotRenameThirdParty(name) => {
+                            format!("Cannot rename third-party fixture '{}'", name)
+                        }
+                        RenameError::InvalidName(name) => {
+                            format!("'{}' is not a valid Python identifier", name)
+                        }
+                    };
+                    error!("Rename failed: {}", error_msg);
+                    return Err(tower_lsp::jsonrpc::Error::invalid_params(error_msg));
+                }
+            }
+        }
+
+        info!("No file path for rename request");
         Ok(None)
     }
 

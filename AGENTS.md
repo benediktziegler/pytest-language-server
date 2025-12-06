@@ -24,7 +24,7 @@ This ensures the user maintains full control over their git workflow.
 - **Language**: Rust (Edition 2021, MSRV 1.83)
 - **Lines of Code**: ~3,120 lines (2,254 in fixtures.rs, 861 in main.rs)
 - **Architecture**: Async LSP server using tower-lsp with CLI support via clap
-- **Key Features**: Fixture go-to-definition, find-references, hover docs, fixture overriding, undeclared fixture diagnostics, CLI commands, `@pytest.mark.usefixtures` support, `@pytest.mark.parametrize` indirect fixtures
+- **Key Features**: Fixture go-to-definition, find-references, hover docs, rename symbol, fixture overriding, undeclared fixture diagnostics, CLI commands, `@pytest.mark.usefixtures` support, `@pytest.mark.parametrize` indirect fixtures
 
 ## Core Architecture
 
@@ -47,7 +47,7 @@ src/
 
 2. **Backend** (`src/main.rs`)
    - LSP server implementation using `tower-lsp`
-   - Handles LSP protocol requests (initialize, goto_definition, references, hover)
+   - Handles LSP protocol requests (initialize, goto_definition, references, hover, rename)
    - Coordinates with FixtureDatabase for fixture information
    - Manages text document lifecycle (did_open, did_change)
 
@@ -60,6 +60,8 @@ pub struct FixtureDefinition {
     pub name: String,
     pub file_path: PathBuf,
     pub line: usize,
+    pub start_char: usize,  // Character position of name on line
+    pub end_char: usize,    // Character position of name end on line
     pub docstring: Option<String>,
 }
 
@@ -90,6 +92,28 @@ pub struct FixtureDatabase {
     file_cache: Arc<DashMap<PathBuf, String>>,
     // Map: file path -> undeclared fixtures in function bodies
     undeclared_fixtures: Arc<DashMap<PathBuf, Vec<UndeclaredFixture>>>,
+}
+
+// Rename-related types:
+
+pub struct RenameLocation {
+    pub file_path: PathBuf,
+    pub line: usize,
+    pub start_char: usize,
+    pub end_char: usize,
+}
+
+pub struct RenameInfo {
+    pub old_name: String,
+    pub definition: RenameLocation,
+    pub usages: Vec<RenameLocation>,
+}
+
+pub enum RenameError {
+    FixtureNotFound,
+    BuiltinFixture(String),      // Cannot rename pytest built-ins
+    ThirdPartyFixture(String),   // Cannot rename site-packages fixtures
+    InvalidNewName(String),      // Not a valid Python identifier
 }
 ```
 
@@ -129,6 +153,11 @@ This is handled by `start_char` and `end_char` in `FixtureUsage`.
 - `get_char_position_from_offset(&self, file_path: &Path, line: usize, char_offset: usize)` - Converts byte offset to character position
 - `get_undeclared_fixtures(&self, file_path: &Path)` - Gets all undeclared fixture usages in a file
 - `scan_function_body_for_undeclared_fixtures()` - Detects fixtures used in function bodies without parameter declaration
+- `collect_rename_locations(&self, file_path: &Path, fixture_name: &str, line: usize, char: usize)` - Collects all rename locations for a fixture (definition + usages)
+- `get_fixture_range_at_position(&self, file_path: &Path, line: usize, char: usize)` - Gets the range and name of fixture at cursor position
+- `is_builtin_fixture(&self, name: &str)` - Checks if fixture is a pytest built-in
+- `is_third_party_fixture(&self, name: &str, file_path: &Path)` - Checks if fixture is from site-packages
+- `is_valid_python_identifier(name: &str)` - Validates new name is a valid Python identifier
 
 **AST Parsing:**
 - Uses `rustpython-parser` to parse Python files
@@ -154,6 +183,8 @@ This is handled by `start_char` and `end_char` in `FixtureUsage`.
 - `did_open()`, `did_change()` - Re-analyzes files when opened/modified, publishes diagnostics
 - `code_action()` - Provides quick fixes to add missing fixture parameters
 - `publish_diagnostics_for_file()` - Publishes warnings for undeclared fixtures
+- `prepare_rename()` - Validates rename is possible, returns fixture name range
+- `rename()` - Performs rename across all usages, returns WorkspaceEdit
 
 ## Testing
 
@@ -194,9 +225,9 @@ RUST_LOG=debug cargo test          # Run with debug logging
 
 ### Test Coverage
 
-- **276 total tests passing** (as of latest)
-  - 210 integration tests in `tests/test_fixtures.rs` (FixtureDatabase API)
-  - 34 integration tests in `tests/test_lsp.rs` (LSP protocol handlers)
+- **306 total tests passing** (as of latest)
+  - 234 integration tests in `tests/test_fixtures.rs` (FixtureDatabase API)
+  - 40 integration tests in `tests/test_lsp.rs` (LSP protocol handlers)
   - 32 integration tests in `tests/test_e2e.rs` (End-to-end CLI and workspace tests)
 
 **Key test areas:**
@@ -216,6 +247,7 @@ RUST_LOG=debug cargo test          # Run with debug logging
 - Sibling directory isolation
 - `@pytest.mark.usefixtures` decorator support
 - `@pytest.mark.parametrize` with `indirect=True` fixtures
+- Rename symbol with scope awareness
 
 **Docstring Variations (8 tests):**
 - Empty, multiline, single-quoted docstrings
@@ -251,6 +283,18 @@ RUST_LOG=debug cargo test          # Run with debug logging
 - `@pytest.mark.usefixtures` on functions and classes
 - `@pytest.mark.parametrize` with `indirect=True`
 - `@pytest.mark.parametrize` with selective `indirect=["fixture"]`
+
+**Rename Symbol (25+ tests):**
+- Basic fixture rename (definition + usages)
+- Rename with conftest.py hierarchy
+- Rename fixture overrides (scoped to specific definition)
+- Self-referencing fixture rename
+- Rename with decorators (@pytest.mark.usefixtures)
+- Sibling directory isolation (rename doesn't cross boundaries)
+- Deep dependency chain rename
+- Builtin fixture rejection (cannot rename `request`, `tmp_path`, etc.)
+- Third-party fixture rejection (cannot rename site-packages fixtures)
+- Invalid Python identifier validation
 
 **E2E Tests (32 tests):**
 - CLI commands with snapshot testing
@@ -594,7 +638,13 @@ The project includes extensions for three major editors/IDEs:
 
 ## Version History
 
-- **v0.11.2** (December 2025) - Current version
+- **v0.12.0** (December 2025) - Current version
+  - Added LSP rename symbol support for fixtures
+  - Scope-aware rename: only renames usages that resolve to the specific definition
+  - Added validation: rejects builtin fixtures, third-party fixtures, invalid Python identifiers
+  - Self-referencing fixtures handled correctly (parameter references parent fixture)
+  - Test suite: 306 tests (234 unit + 40 LSP + 32 E2E)
+- **v0.11.2** (December 2025)
   - Fixed fixture scoping: sibling test files no longer incorrectly share fixtures (#23)
   - Usage counting now uses per-definition scoped counting instead of global name counting
   - Added 4 new scoping tests
@@ -614,6 +664,6 @@ The project includes extensions for three major editors/IDEs:
 
 ---
 
-**Last Updated**: v0.11.2 (December 2025)
+**Last Updated**: v0.12.0 (December 2025)
 
 This document should be updated when making significant architectural changes or adding new features.
