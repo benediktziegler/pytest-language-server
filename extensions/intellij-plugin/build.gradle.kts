@@ -31,6 +31,9 @@ kotlin {
 }
 
 intellijPlatform {
+    buildSearchableOptions = false
+    instrumentCode = false
+
     pluginConfiguration {
         ideaVersion {
             sinceBuild = "242"
@@ -84,15 +87,5 @@ tasks {
 
     publishPlugin {
         token.set(System.getenv("PUBLISH_TOKEN"))
-    }
-
-    buildSearchableOptions {
-        enabled = false
-    }
-
-    // Disable instrumentCode to avoid dependency resolution issues with JetBrains Maven
-    // This task performs bytecode instrumentation which is not critical for our simple LSP extension
-    instrumentCode {
-        enabled = false
     }
 }
