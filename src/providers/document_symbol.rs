@@ -4,8 +4,8 @@
 //! and breadcrumb navigation for fixtures in the editor.
 
 use super::Backend;
-use tower_lsp::jsonrpc::Result;
-use tower_lsp::lsp_types::*;
+use tower_lsp_server::jsonrpc::Result;
+use tower_lsp_server::ls_types::*;
 use tracing::info;
 
 impl Backend {

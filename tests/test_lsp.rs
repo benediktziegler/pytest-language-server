@@ -6,7 +6,7 @@ use ntest::timeout;
 use pytest_language_server::FixtureDefinition;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tower_lsp::lsp_types::*;
+use tower_lsp_server::ls_types::*;
 
 #[test]
 #[timeout(30000)]

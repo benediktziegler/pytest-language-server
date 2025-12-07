@@ -2,7 +2,7 @@
 name = "pytest-language-server"
 version = "0.13.0"
 edition = "2021"
-rust-version = "1.83"
+rust-version = "1.85"
 authors = ["Thiago Bellini Ribeiro <hackedbellini@gmail.com>"]
 license = "MIT"
 description = "A blazingly fast Language Server Protocol implementation for pytest"
@@ -19,7 +19,7 @@ name = "pytest_language_server"
 path = "src/lib.rs"
 
 [dependencies]
-tower-lsp = "0.20.0"
+tower-lsp-server = "0.23.0"
 tokio = { version = "1.48", features = ["full"] }
 serde_json = "1.0"
 rustpython-parser = "0.4.0"

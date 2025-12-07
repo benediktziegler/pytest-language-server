@@ -16,8 +16,8 @@ use crate::fixtures::FixtureDatabase;
 use dashmap::DashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tower_lsp::lsp_types::*;
-use tower_lsp::Client;
+use tower_lsp_server::ls_types::*;
+use tower_lsp_server::Client;
 use tracing::warn;
 
 /// The LSP Backend struct containing server state.
@@ -32,7 +32,7 @@ pub struct Backend {
     pub scan_task: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// Cache mapping canonical paths to original URIs from the client
     /// This ensures we respond with URIs the client recognizes
-    pub uri_cache: Arc<DashMap<PathBuf, Url>>,
+    pub uri_cache: Arc<DashMap<PathBuf, Uri>>,
 }
 
 impl Backend {
@@ -50,14 +50,15 @@ impl Backend {
 
     /// Convert URI to PathBuf with error logging
     /// Canonicalizes the path to handle symlinks (e.g., /var -> /private/var on macOS)
-    pub fn uri_to_path(&self, uri: &Url) -> Option<PathBuf> {
+    pub fn uri_to_path(&self, uri: &Uri) -> Option<PathBuf> {
         match uri.to_file_path() {
-            Ok(path) => {
+            Some(path) => {
                 // Canonicalize to match how paths are stored in FixtureDatabase
                 // This handles symlinks like /var -> /private/var on macOS
+                let path = path.to_path_buf();
                 Some(path.canonicalize().unwrap_or(path))
             }
-            Err(_) => {
+            None => {
                 warn!("Failed to convert URI to file path: {:?}", uri);
                 None
             }
@@ -66,7 +67,7 @@ impl Backend {
 
     /// Convert PathBuf to URI with error logging
     /// First checks the URI cache for a previously seen URI, then falls back to creating one
-    pub fn path_to_uri(&self, path: &std::path::Path) -> Option<Url> {
+    pub fn path_to_uri(&self, path: &std::path::Path) -> Option<Uri> {
         // First, check if we have a cached URI for this path
         // This ensures we use the same URI format the client originally sent
         if let Some(cached_uri) = self.uri_cache.get(path) {
@@ -92,9 +93,9 @@ impl Backend {
         let final_path = path_to_use.as_deref().unwrap_or(path);
 
         // Fall back to creating a new URI from the path
-        match Url::from_file_path(final_path) {
-            Ok(uri) => Some(uri),
-            Err(_) => {
+        match Uri::from_file_path(final_path) {
+            Some(uri) => Some(uri),
+            None => {
                 warn!("Failed to convert path to URI: {:?}", path);
                 None
             }

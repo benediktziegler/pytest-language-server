@@ -1,8 +1,8 @@
 //! Find-references provider for pytest fixtures.
 
 use super::Backend;
-use tower_lsp::jsonrpc::Result;
-use tower_lsp::lsp_types::*;
+use tower_lsp_server::jsonrpc::Result;
+use tower_lsp_server::ls_types::*;
 use tracing::{debug, info};
 
 impl Backend {

@@ -1,12 +1,12 @@
 //! Diagnostics provider for pytest fixtures.
 
 use super::Backend;
-use tower_lsp::lsp_types::*;
+use tower_lsp_server::ls_types::*;
 use tracing::info;
 
 impl Backend {
     /// Publish diagnostics for undeclared fixtures in a file
-    pub async fn publish_diagnostics_for_file(&self, uri: &Url, file_path: &std::path::Path) {
+    pub async fn publish_diagnostics_for_file(&self, uri: &Uri, file_path: &std::path::Path) {
         let undeclared = self.fixture_db.get_undeclared_fixtures(file_path);
 
         let diagnostics: Vec<Diagnostic> = undeclared

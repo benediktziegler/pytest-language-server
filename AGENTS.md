@@ -21,9 +21,9 @@ This ensures the user maintains full control over their git workflow.
 
 **pytest-language-server** is a Language Server Protocol (LSP) implementation for pytest fixtures, written in Rust. It provides IDE features like go-to-definition, find-references, and hover documentation for pytest fixtures.
 
-- **Language**: Rust (Edition 2021, MSRV 1.83)
+- **Language**: Rust (Edition 2021, MSRV 1.85)
 - **Lines of Code**: ~4,100 lines across modular structure
-- **Architecture**: Async LSP server using tower-lsp with CLI support via clap
+- **Architecture**: Async LSP server using tower-lsp-server with CLI support via clap
 - **Key Features**: Fixture go-to-definition, find-references, hover docs, **code completion**, **document symbols**, **workspace symbols**, **code lens**, fixture overriding, undeclared fixture diagnostics, CLI commands, `@pytest.mark.usefixtures` support, `@pytest.mark.parametrize` indirect fixtures
 
 ## Core Architecture
@@ -70,7 +70,7 @@ src/
      - `string_utils.rs` - String manipulation utilities (docstring formatting, word extraction)
 
 2. **Backend** (`src/providers/`)
-   - LSP server implementation using `tower-lsp`
+   - LSP server implementation using `tower-lsp-server`
    - Each LSP feature in its own file:
      - `definition.rs` - Go-to-definition handler
      - `references.rs` - Find-references handler
@@ -499,7 +499,7 @@ Install with: `pre-commit install`
 ## Dependencies
 
 Core dependencies (from `Cargo.toml`):
-- **tower-lsp** (0.20.0) - LSP framework
+- **tower-lsp-server** (0.23.0) - LSP framework
 - **tokio** (1.48) - Async runtime
 - **rustpython-parser** (0.4.0) - Python AST parsing
 - **dashmap** (6.1) - Concurrent hash map

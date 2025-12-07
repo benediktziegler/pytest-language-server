@@ -487,7 +487,7 @@ The server automatically scans your virtual environment for any pytest plugin an
 ## Architecture
 
 - **Language**: Rust 🦀
-- **LSP Framework**: tower-lsp
+- **LSP Framework**: tower-lsp-server
 - **Parser**: rustpython-parser
 - **Concurrency**: tokio async runtime
 - **Data Structures**: DashMap for lock-free concurrent access
@@ -496,7 +496,7 @@ The server automatically scans your virtual environment for any pytest plugin an
 
 ### Prerequisites
 
-- Rust 1.83+ (2021 edition)
+- Rust 1.85+ (2021 edition)
 - Python 3.10+ (for testing)
 
 ### Building
@@ -553,7 +553,7 @@ MIT License - see LICENSE file for details.
 ## Acknowledgments
 
 Built with:
-- [tower-lsp](https://github.com/ebkalderon/tower-lsp) - LSP framework
+- [tower-lsp-server](https://github.com/tower-lsp-community/tower-lsp-server) - LSP framework
 - [rustpython-parser](https://github.com/RustPython/RustPython) - Python AST parsing
 - [tokio](https://tokio.rs/) - Async runtime
 

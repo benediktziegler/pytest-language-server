@@ -6,20 +6,31 @@ use fixtures::FixtureDatabase;
 use providers::Backend;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tower_lsp::jsonrpc::Result;
-use tower_lsp::lsp_types::*;
-use tower_lsp::{LanguageServer, LspService, Server};
+use tower_lsp_server::jsonrpc::Result;
+use tower_lsp_server::ls_types::*;
+use tower_lsp_server::{LanguageServer, LspService, Server};
 use tracing::{error, info, warn};
 
-#[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
         info!("Initialize request received");
 
         // Scan the workspace for fixtures on initialization
         // This is done in a background task to avoid blocking the LSP initialization
-        if let Some(root_uri) = params.root_uri.clone() {
-            if let Ok(root_path) = root_uri.to_file_path() {
+        // Try workspace_folders first (preferred), fall back to deprecated root_uri
+        let root_uri = params
+            .workspace_folders
+            .as_ref()
+            .and_then(|folders| folders.first())
+            .map(|folder| folder.uri.clone())
+            .or_else(|| {
+                #[allow(deprecated)]
+                params.root_uri.clone()
+            });
+
+        if let Some(root_uri) = root_uri {
+            if let Some(root_path) = root_uri.to_file_path() {
+                let root_path = root_path.to_path_buf();
                 info!("Starting workspace scan: {:?}", root_path);
 
                 // Store the original workspace root (as client provided it)
@@ -205,8 +216,9 @@ impl LanguageServer for Backend {
     async fn symbol(
         &self,
         params: WorkspaceSymbolParams,
-    ) -> Result<Option<Vec<SymbolInformation>>> {
-        self.handle_workspace_symbol(params).await
+    ) -> Result<Option<WorkspaceSymbolResponse>> {
+        let result = self.handle_workspace_symbol(params).await?;
+        Ok(result.map(WorkspaceSymbolResponse::Flat))
     }
 
     async fn code_lens(&self, params: CodeLensParams) -> Result<Option<Vec<CodeLens>>> {
