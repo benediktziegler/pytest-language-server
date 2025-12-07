@@ -28,6 +28,7 @@ allow = [
     "Unicode-3.0",          # Used by ICU crates for Unicode data
     "CC0-1.0",
     "0BSD",
+    "MIT-0",                # MIT No Attribution (used by borrow-or-share via tower-lsp-server)
     "Zlib",
     "MPL-2.0",
     "LGPL-3.0-only",        # Used by malachite (via rustpython-parser)
