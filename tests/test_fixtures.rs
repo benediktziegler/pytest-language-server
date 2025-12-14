@@ -8947,3 +8947,283 @@ def cycle2_z(cycle2_x):
         cycles.len()
     );
 }
+
+// ============ Scope Validation Tests ============
+
+#[test]
+#[timeout(30000)]
+fn test_scope_mismatch_session_depends_on_function() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def function_fixture():
+    return "function"
+
+@pytest.fixture(scope="session")
+def session_fixture(function_fixture):
+    return function_fixture + "_session"
+"#;
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    let mismatches = db.detect_scope_mismatches_in_file(&path);
+    assert_eq!(
+        mismatches.len(),
+        1,
+        "Should detect session->function scope mismatch"
+    );
+
+    let mismatch = &mismatches[0];
+    assert_eq!(mismatch.fixture.name, "session_fixture");
+    assert_eq!(mismatch.dependency.name, "function_fixture");
+}
+
+#[test]
+#[timeout(30000)]
+fn test_scope_mismatch_module_depends_on_function() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def func_fixture():
+    return "func"
+
+@pytest.fixture(scope="module")
+def mod_fixture(func_fixture):
+    return func_fixture + "_mod"
+"#;
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    let mismatches = db.detect_scope_mismatches_in_file(&path);
+    assert_eq!(
+        mismatches.len(),
+        1,
+        "Should detect module->function scope mismatch"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_scope_no_mismatch_valid_hierarchy() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture(scope="session")
+def session_fixture():
+    return "session"
+
+@pytest.fixture(scope="module")
+def module_fixture(session_fixture):
+    return session_fixture + "_module"
+
+@pytest.fixture
+def function_fixture(module_fixture):
+    return module_fixture + "_function"
+"#;
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    let mismatches = db.detect_scope_mismatches_in_file(&path);
+    assert!(
+        mismatches.is_empty(),
+        "Should not detect mismatches in valid hierarchy"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_scope_same_scope_no_mismatch() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture(scope="module")
+def mod_fixture_a():
+    return "a"
+
+@pytest.fixture(scope="module")
+def mod_fixture_b(mod_fixture_a):
+    return mod_fixture_a + "_b"
+"#;
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    let mismatches = db.detect_scope_mismatches_in_file(&path);
+    assert!(mismatches.is_empty(), "Same scope should not be a mismatch");
+}
+
+#[test]
+#[timeout(30000)]
+fn test_scope_class_depends_on_function() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def func_fixture():
+    return "func"
+
+@pytest.fixture(scope="class")
+def class_fixture(func_fixture):
+    return func_fixture + "_class"
+"#;
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    let mismatches = db.detect_scope_mismatches_in_file(&path);
+    assert_eq!(
+        mismatches.len(),
+        1,
+        "Should detect class->function scope mismatch"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_scope_package_depends_on_module() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture(scope="module")
+def mod_fixture():
+    return "module"
+
+@pytest.fixture(scope="package")
+def pkg_fixture(mod_fixture):
+    return mod_fixture + "_pkg"
+"#;
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    let mismatches = db.detect_scope_mismatches_in_file(&path);
+    assert_eq!(
+        mismatches.len(),
+        1,
+        "Should detect package->module scope mismatch"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_scope_multiple_mismatches() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def func_a():
+    return "a"
+
+@pytest.fixture
+def func_b():
+    return "b"
+
+@pytest.fixture(scope="session")
+def session_fixture(func_a, func_b):
+    return func_a + func_b
+"#;
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    let mismatches = db.detect_scope_mismatches_in_file(&path);
+    assert_eq!(mismatches.len(), 2, "Should detect two scope mismatches");
+}
+
+#[test]
+#[timeout(30000)]
+fn test_scope_default_is_function() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def default_fixture():
+    return "default"
+"#;
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    let defs = db.definitions.get("default_fixture").unwrap();
+    assert_eq!(
+        defs[0].scope,
+        pytest_language_server::FixtureScope::Function
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_scope_extraction_all_scopes() {
+    use pytest_language_server::FixtureScope;
+
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture(scope="function")
+def func_fix():
+    pass
+
+@pytest.fixture(scope="class")
+def class_fix():
+    pass
+
+@pytest.fixture(scope="module")
+def mod_fix():
+    pass
+
+@pytest.fixture(scope="package")
+def pkg_fix():
+    pass
+
+@pytest.fixture(scope="session")
+def session_fix():
+    pass
+"#;
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    assert_eq!(
+        db.definitions.get("func_fix").unwrap()[0].scope,
+        FixtureScope::Function
+    );
+    assert_eq!(
+        db.definitions.get("class_fix").unwrap()[0].scope,
+        FixtureScope::Class
+    );
+    assert_eq!(
+        db.definitions.get("mod_fix").unwrap()[0].scope,
+        FixtureScope::Module
+    );
+    assert_eq!(
+        db.definitions.get("pkg_fix").unwrap()[0].scope,
+        FixtureScope::Package
+    );
+    assert_eq!(
+        db.definitions.get("session_fix").unwrap()[0].scope,
+        FixtureScope::Session
+    );
+}

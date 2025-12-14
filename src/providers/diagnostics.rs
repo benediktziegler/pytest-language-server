@@ -57,6 +57,34 @@ impl Backend {
             });
         }
 
+        // Collect scope mismatch diagnostics
+        let mismatches = self.fixture_db.detect_scope_mismatches_in_file(file_path);
+        for mismatch in mismatches {
+            let line = Self::internal_line_to_lsp(mismatch.fixture.line);
+            diagnostics.push(Diagnostic {
+                range: Self::create_range(
+                    line,
+                    mismatch.fixture.start_char as u32,
+                    line,
+                    mismatch.fixture.end_char as u32,
+                ),
+                severity: Some(DiagnosticSeverity::WARNING),
+                code: Some(NumberOrString::String("scope-mismatch".to_string())),
+                code_description: None,
+                source: Some("pytest-lsp".to_string()),
+                message: format!(
+                    "{}-scoped fixture '{}' depends on {}-scoped fixture '{}'",
+                    mismatch.fixture.scope.as_str(),
+                    mismatch.fixture.name,
+                    mismatch.dependency.scope.as_str(),
+                    mismatch.dependency.name
+                ),
+                related_information: None,
+                tags: None,
+                data: None,
+            });
+        }
+
         info!("Publishing {} diagnostics for {:?}", diagnostics.len(), uri);
         self.client
             .publish_diagnostics(uri.clone(), diagnostics, None)

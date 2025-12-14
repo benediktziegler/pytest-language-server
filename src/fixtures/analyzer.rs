@@ -5,7 +5,7 @@
 //! and undeclared fixture scanning is in `undeclared.rs`.
 
 use super::decorators;
-use super::types::{FixtureDefinition, FixtureUsage};
+use super::types::{FixtureDefinition, FixtureScope, FixtureUsage};
 use super::FixtureDatabase;
 use rustpython_parser::ast::{ArgWithDefault, Arguments, Expr, Stmt};
 use rustpython_parser::{parse, Mode};
@@ -356,13 +356,16 @@ impl FixtureDatabase {
             let fixture_name = decorators::extract_fixture_name_from_decorator(decorator)
                 .unwrap_or_else(|| func_name.to_string());
 
+            // Extract scope from decorator (defaults to function scope)
+            let scope = decorators::extract_fixture_scope(decorator).unwrap_or_default();
+
             let line = self.get_line_from_offset(range.start().to_usize(), line_index);
             let docstring = self.extract_docstring(body);
             let return_type = self.extract_return_type(returns, body, content);
 
             info!(
-                "Found fixture definition: {} (function: {}) at {:?}:{}",
-                fixture_name, func_name, file_path, line
+                "Found fixture definition: {} (function: {}, scope: {:?}) at {:?}:{}",
+                fixture_name, func_name, scope, file_path, line
             );
 
             let (start_char, end_char) = self.find_function_name_position(content, line, func_name);
@@ -395,6 +398,7 @@ impl FixtureDatabase {
                 return_type,
                 is_third_party,
                 dependencies: dependencies.clone(),
+                scope,
             };
 
             self.record_fixture_definition(definition);
@@ -534,6 +538,7 @@ impl FixtureDatabase {
                                 return_type: None,
                                 is_third_party,
                                 dependencies: Vec::new(), // Assignment-style fixtures don't have explicit dependencies
+                                scope: FixtureScope::default(), // Assignment-style fixtures default to function scope
                             };
 
                             self.record_fixture_definition(definition);

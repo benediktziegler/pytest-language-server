@@ -962,4 +962,56 @@ impl FixtureDatabase {
             .cloned()
             .collect()
     }
+
+    // ============ Scope Validation ============
+
+    /// Detect scope mismatches where a broader-scoped fixture depends on a narrower-scoped fixture.
+    /// For example, a session-scoped fixture depending on a function-scoped fixture.
+    /// Returns mismatches for fixtures defined in the given file.
+    pub fn detect_scope_mismatches_in_file(
+        &self,
+        file_path: &Path,
+    ) -> Vec<super::types::ScopeMismatch> {
+        use super::types::ScopeMismatch;
+
+        let mut mismatches = Vec::new();
+
+        // Get fixtures defined in this file
+        let Some(fixture_names) = self.file_definitions.get(file_path) else {
+            return mismatches;
+        };
+
+        for fixture_name in fixture_names.iter() {
+            // Get the fixture definition
+            let Some(definitions) = self.definitions.get(fixture_name) else {
+                continue;
+            };
+
+            // Find the definition in this file
+            let Some(fixture_def) = definitions.iter().find(|d| d.file_path == file_path) else {
+                continue;
+            };
+
+            // Check each dependency
+            for dep_name in &fixture_def.dependencies {
+                // Find the dependency's definition (use resolution logic to get correct one)
+                if let Some(dep_definitions) = self.definitions.get(dep_name) {
+                    // Find best matching definition for the dependency
+                    // Use the first one (most local) - matches cycle detection behavior
+                    if let Some(dep_def) = dep_definitions.first() {
+                        // Check if scope mismatch: fixture has broader scope than dependency
+                        // FixtureScope is ordered: Function < Class < Module < Package < Session
+                        if fixture_def.scope > dep_def.scope {
+                            mismatches.push(ScopeMismatch {
+                                fixture: fixture_def.clone(),
+                                dependency: dep_def.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        mismatches
+    }
 }

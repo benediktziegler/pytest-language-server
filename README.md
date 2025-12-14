@@ -135,6 +135,29 @@ One-click fixes for common pytest issues:
 ### ⚠️ Diagnostics & Quick Fixes
 Detect and fix common pytest fixture issues with intelligent code actions:
 
+**Fixture Scope Validation:**
+- Detects when a broader-scoped fixture depends on a narrower-scoped fixture
+- Example: A `session`-scoped fixture cannot depend on a `function`-scoped fixture
+- Warnings show both the fixture's scope and its dependency's scope
+- Prevents hard-to-debug test failures from scope violations
+
+**Circular Dependency Detection:**
+- Detects when fixtures form circular dependency chains (A → B → C → A)
+- Reports the full cycle path for easy debugging
+- Works across files (conftest.py hierarchies)
+
+Scope mismatch example:
+```python
+# ⚠️ Scope mismatch! session-scoped fixture depends on function-scoped
+@pytest.fixture(scope="session")
+def shared_db(temp_dir):  # temp_dir is function-scoped
+    return Database(temp_dir)
+
+@pytest.fixture  # Default is function scope
+def temp_dir(tmp_path):
+    return tmp_path / "test"
+```
+
 **Undeclared Fixture Detection:**
 - Detects when fixtures are used in function bodies but not declared as parameters
 - **Line-aware scoping**: Correctly handles local variables assigned later in the function

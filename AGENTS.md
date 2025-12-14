@@ -77,7 +77,7 @@ src/
      - `references.rs` - Find-references handler
      - `hover.rs` - Hover documentation handler
      - `completion.rs` - Code completion with auto-add parameter support
-     - `diagnostics.rs` - Undeclared fixture warnings
+     - `diagnostics.rs` - Undeclared fixture warnings, scope mismatch warnings, circular dependency errors
      - `code_action.rs` - Quick fixes to add missing parameters
      - `code_lens.rs` - Usage count lenses above fixtures
      - `inlay_hint.rs` - Type hints for fixture parameters
@@ -100,6 +100,17 @@ pub struct FixtureDefinition {
     pub end_char: usize,    // Character position of name end on line
     pub docstring: Option<String>,
     pub is_third_party: bool,  // True if from site-packages (cached for performance)
+    pub dependencies: Vec<String>,  // Names of fixtures this fixture depends on
+    pub scope: FixtureScope,  // Fixture scope (function, class, module, package, session)
+}
+
+/// Pytest fixture scope, ordered from narrowest to broadest.
+pub enum FixtureScope {
+    Function = 0,  // Default - created once per test function
+    Class = 1,     // Created once per test class
+    Module = 2,    // Created once per test module
+    Package = 3,   // Created once per test package
+    Session = 4,   // Created once per test session
 }
 
 pub struct FixtureUsage {
@@ -642,7 +653,7 @@ Critical LSP specification requirements:
 ## Troubleshooting
 
 ### Tests failing after fixture logic changes
-- Check that all 332 tests pass: `cargo test`
+- Check that all 365 tests pass: `cargo test`
 - Focus on failing tests in `fixtures/` modules (fixture resolution) or `providers/` (LSP handlers)
 - Common issue: fixture priority rules not respecting conftest.py hierarchy
 
@@ -713,7 +724,21 @@ The project includes extensions for three major editors/IDEs:
 
 ## Version History
 
-- **v0.13.0** (December 2025) - Current version
+- **v0.15.0** (December 2025) - Current version
+  - Added fixture scope validation diagnostics
+  - Detects when broader-scoped fixtures depend on narrower-scoped fixtures
+  - Added `FixtureScope` enum (Function, Class, Module, Package, Session)
+  - Added `scope` field to `FixtureDefinition`
+  - Added `ScopeMismatch` struct and `detect_scope_mismatches_in_file()` resolver method
+  - Added `extract_fixture_scope()` to decorators.rs
+  - Test suite: 365 tests
+- **v0.14.0** (December 2025)
+  - Added `fixtures unused` CLI command with CI-friendly exit codes
+  - Added circular dependency detection with cached iterative DFS
+  - Added `dependencies` field to `FixtureDefinition`
+  - Added inlay hints for fixture return types
+  - Added memchr optimization for SIMD-accelerated line indexing
+- **v0.13.0** (December 2025)
   - Added LSP code completion support for fixtures
   - Context-aware completions: function signatures, function bodies, decorators
   - Auto-add fixture to parameters when completing in function body
@@ -742,6 +767,6 @@ The project includes extensions for three major editors/IDEs:
 
 ---
 
-**Last Updated**: v0.13.0 (December 2025)
+**Last Updated**: v0.15.0 (December 2025)
 
 This document should be updated when making significant architectural changes or adding new features.

@@ -2,6 +2,48 @@
 
 use std::path::PathBuf;
 
+/// Pytest fixture scope, ordered from narrowest to broadest.
+/// A fixture with a broader scope cannot depend on a fixture with a narrower scope.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FixtureScope {
+    /// Function scope (default) - created once per test function
+    #[default]
+    Function = 0,
+    /// Class scope - created once per test class
+    Class = 1,
+    /// Module scope - created once per test module
+    Module = 2,
+    /// Package scope - created once per test package
+    Package = 3,
+    /// Session scope - created once per test session
+    Session = 4,
+}
+
+impl FixtureScope {
+    /// Parse scope from a string (as used in @pytest.fixture(scope="..."))
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "function" => Some(Self::Function),
+            "class" => Some(Self::Class),
+            "module" => Some(Self::Module),
+            "package" => Some(Self::Package),
+            "session" => Some(Self::Session),
+            _ => None,
+        }
+    }
+
+    /// Get display name for the scope
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Function => "function",
+            Self::Class => "class",
+            Self::Module => "module",
+            Self::Package => "package",
+            Self::Session => "session",
+        }
+    }
+}
+
 /// A fixture definition extracted from a Python file.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FixtureDefinition {
@@ -14,6 +56,7 @@ pub struct FixtureDefinition {
     pub return_type: Option<String>, // The return type annotation (for generators, the yielded type)
     pub is_third_party: bool, // Whether this fixture is from a third-party package (site-packages)
     pub dependencies: Vec<String>, // Names of fixtures this fixture depends on (via parameters)
+    pub scope: FixtureScope,  // The fixture's scope (function, class, module, package, session)
 }
 
 /// A fixture usage (reference) in a Python file.
@@ -46,6 +89,15 @@ pub struct FixtureCycle {
     pub cycle_path: Vec<String>,
     /// The fixture where the cycle was detected (first fixture in the cycle).
     pub fixture: FixtureDefinition,
+}
+
+/// A scope mismatch where a broader-scoped fixture depends on a narrower-scoped fixture.
+#[derive(Debug, Clone)]
+pub struct ScopeMismatch {
+    /// The fixture with broader scope that has the invalid dependency.
+    pub fixture: FixtureDefinition,
+    /// The dependency fixture with narrower scope.
+    pub dependency: FixtureDefinition,
 }
 
 /// Context for code completion.

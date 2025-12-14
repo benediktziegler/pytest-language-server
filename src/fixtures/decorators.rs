@@ -166,3 +166,23 @@ pub fn extract_parametrize_indirect_fixtures(
 
     vec![]
 }
+
+/// Extracts the scope from a @pytest.fixture(scope="...") decorator.
+/// Returns None if no scope is specified (defaults to "function" at call site).
+pub fn extract_fixture_scope(expr: &Expr) -> Option<super::types::FixtureScope> {
+    let Expr::Call(call) = expr else { return None };
+    if !is_fixture_decorator(&call.func) {
+        return None;
+    }
+
+    call.keywords
+        .iter()
+        .filter(|kw| kw.arg.as_ref().is_some_and(|a| a.as_str() == "scope"))
+        .find_map(|kw| match &kw.value {
+            Expr::Constant(c) => match &c.value {
+                rustpython_parser::ast::Constant::Str(s) => super::types::FixtureScope::parse(s),
+                _ => None,
+            },
+            _ => None,
+        })
+}

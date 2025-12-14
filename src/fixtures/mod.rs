@@ -18,8 +18,8 @@ mod undeclared;
 
 #[allow(unused_imports)] // ParamInsertionInfo re-exported for public API via lib.rs
 pub use types::{
-    CompletionContext, FixtureCycle, FixtureDefinition, FixtureUsage, ParamInsertionInfo,
-    UndeclaredFixture,
+    CompletionContext, FixtureCycle, FixtureDefinition, FixtureScope, FixtureUsage,
+    ParamInsertionInfo, ScopeMismatch, UndeclaredFixture,
 };
 
 use dashmap::DashMap;
