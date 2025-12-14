@@ -134,14 +134,14 @@ impl FixtureDatabase {
         }
     }
 
-    /// Build an index of line start offsets for O(1) line number lookups
+    /// Build an index of line start offsets for O(1) line number lookups.
+    /// Uses memchr for SIMD-accelerated newline searching.
     pub(crate) fn build_line_index(content: &str) -> Vec<usize> {
+        let bytes = content.as_bytes();
         let mut line_index = Vec::with_capacity(content.len() / 30);
         line_index.push(0);
-        for (i, c) in content.char_indices() {
-            if c == '\n' {
-                line_index.push(i + 1);
-            }
+        for i in memchr::memchr_iter(b'\n', bytes) {
+            line_index.push(i + 1);
         }
         line_index
     }

@@ -889,6 +889,7 @@ dependencies = [
  "colored",
  "dashmap",
  "insta",
+ "memchr",
  "ntest",
  "predicates",
  "rayon",
