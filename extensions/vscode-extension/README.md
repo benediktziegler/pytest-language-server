@@ -5,10 +5,16 @@ A blazingly fast Language Server Protocol implementation for pytest fixtures, wr
 ## Features
 
 - **Go to Definition**: Jump to fixture definitions from usage
+- **Go to Implementation**: Navigate to yield statements in generator fixtures
+- **Call Hierarchy**: Explore fixture dependencies (incoming/outgoing calls)
 - **Code Completion**: Smart auto-completion for pytest fixtures with context-aware suggestions
 - **Find References**: Find all usages of a fixture
 - **Hover Documentation**: View fixture signatures and docstrings
-- **Diagnostics**: Warnings for undeclared fixtures used in function bodies
+- **Document Symbols**: Navigate fixtures within a file using the outline view
+- **Workspace Symbols**: Search for fixtures across your entire workspace
+- **Code Lens**: See fixture usage counts directly above definitions
+- **Inlay Hints**: See fixture return types inline next to parameters
+- **Diagnostics**: Warnings for undeclared fixtures, scope mismatches, and circular dependencies
 - **Code Actions**: Quick fixes to add missing fixture parameters
 - **Fixture Priority**: Correctly handles pytest's fixture shadowing rules
 

@@ -78,7 +78,5 @@ The `bump-version.sh` script updates versions in:
 - `pyproject.toml`
 - `zed-extension/Cargo.toml`
 - `zed-extension/extension.toml`
-
-**Manually updated by CI:**
 - `vscode-extension/package.json`
 - `intellij-plugin/build.gradle.kts`

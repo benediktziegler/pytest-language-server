@@ -82,6 +82,14 @@ db.analyze_file(...);  // Safe
 ./bump-version.sh X.Y.Z
 ```
 
+### Extension Documentation
+When adding new LSP features, update the feature lists in all extension READMEs:
+- `extensions/vscode-extension/README.md`
+- `extensions/intellij-plugin/README.md`
+- `extensions/zed-extension/README.md`
+
+Keep them in sync with the main `README.md` features section.
+
 ## Known Limitations
 
 - Fixtures defined inside `if` blocks are not detected
