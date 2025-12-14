@@ -1,8 +1,8 @@
 pub mod fixtures;
 
 pub use fixtures::{
-    CompletionContext, FixtureDatabase, FixtureDefinition, FixtureUsage, ParamInsertionInfo,
-    UndeclaredFixture,
+    CompletionContext, FixtureCycle, FixtureDatabase, FixtureDefinition, FixtureUsage,
+    ParamInsertionInfo, UndeclaredFixture,
 };
 
 // Expose decorators module for testing

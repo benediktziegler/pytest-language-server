@@ -178,6 +178,145 @@ fn test_cli_conflicting_flags() {
         .failure();
 }
 
+// MARK: CLI fixtures unused E2E Tests
+
+#[test]
+#[timeout(30000)]
+fn test_cli_fixtures_unused_text_output() {
+    let mut cmd = Command::cargo_bin("pytest-language-server").unwrap();
+    let output = cmd
+        .arg("fixtures")
+        .arg("unused")
+        .arg("tests/test_project")
+        .output()
+        .expect("Failed to execute command");
+
+    // Should exit with code 1 when unused fixtures are found
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Should contain the header
+    assert!(stdout.contains("Found") && stdout.contains("unused fixture"));
+
+    // Should contain known unused fixtures from test_project
+    // (iterator_fixture, auto_cleanup, temp_dir, temp_file are unused)
+    assert!(stdout.contains("iterator_fixture") || stdout.contains("auto_cleanup"));
+}
+
+#[test]
+#[timeout(30000)]
+fn test_cli_fixtures_unused_json_output() {
+    let mut cmd = Command::cargo_bin("pytest-language-server").unwrap();
+    let output = cmd
+        .arg("fixtures")
+        .arg("unused")
+        .arg("tests/test_project")
+        .arg("--format")
+        .arg("json")
+        .output()
+        .expect("Failed to execute command");
+
+    // Should exit with code 1 when unused fixtures are found
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Should be valid JSON
+    let parsed: Result<serde_json::Value, _> = serde_json::from_str(&stdout);
+    assert!(parsed.is_ok(), "Output should be valid JSON: {}", stdout);
+
+    let json = parsed.unwrap();
+    assert!(json.is_array(), "JSON output should be an array");
+
+    let arr = json.as_array().unwrap();
+    assert!(!arr.is_empty(), "Should have at least one unused fixture");
+
+    // Each item should have "file" and "fixture" keys
+    for item in arr {
+        assert!(
+            item.get("file").is_some(),
+            "Each item should have 'file' key"
+        );
+        assert!(
+            item.get("fixture").is_some(),
+            "Each item should have 'fixture' key"
+        );
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_cli_fixtures_unused_exit_code_zero_when_all_used() {
+    // Create a temp directory with all fixtures used
+    let temp_dir = std::env::temp_dir().join("test_all_used");
+    std::fs::create_dir_all(&temp_dir).ok();
+
+    std::fs::write(
+        temp_dir.join("conftest.py"),
+        r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return "value"
+"#,
+    )
+    .ok();
+
+    std::fs::write(
+        temp_dir.join("test_example.py"),
+        r#"
+def test_something(my_fixture):
+    assert my_fixture == "value"
+"#,
+    )
+    .ok();
+
+    let mut cmd = Command::cargo_bin("pytest-language-server").unwrap();
+    let output = cmd
+        .arg("fixtures")
+        .arg("unused")
+        .arg(&temp_dir)
+        .output()
+        .expect("Failed to execute command");
+
+    // Should exit with code 0 when all fixtures are used
+    assert!(output.status.success());
+    assert_eq!(output.status.code(), Some(0));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("No unused fixtures found"));
+
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
+
+#[test]
+#[timeout(30000)]
+fn test_cli_fixtures_unused_nonexistent_path() {
+    let mut cmd = Command::cargo_bin("pytest-language-server").unwrap();
+    cmd.arg("fixtures")
+        .arg("unused")
+        .arg("/nonexistent/path/to/project")
+        .assert()
+        .failure();
+}
+
+#[test]
+#[timeout(30000)]
+fn test_cli_fixtures_unused_help() {
+    let mut cmd = Command::cargo_bin("pytest-language-server").unwrap();
+    cmd.arg("fixtures")
+        .arg("unused")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("unused fixtures"))
+        .stdout(predicate::str::contains("--format"));
+}
+
 // MARK: Workspace Scanning E2E Tests
 
 #[test]

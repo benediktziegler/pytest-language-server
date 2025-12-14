@@ -13,6 +13,7 @@ pub struct FixtureDefinition {
     pub docstring: Option<String>,
     pub return_type: Option<String>, // The return type annotation (for generators, the yielded type)
     pub is_third_party: bool, // Whether this fixture is from a third-party package (site-packages)
+    pub dependencies: Vec<String>, // Names of fixtures this fixture depends on (via parameters)
 }
 
 /// A fixture usage (reference) in a Python file.
@@ -36,6 +37,15 @@ pub struct UndeclaredFixture {
     pub end_char: usize,
     pub function_name: String, // Name of the test/fixture function where this is used
     pub function_line: usize,  // Line where the function is defined
+}
+
+/// A circular dependency between fixtures.
+#[derive(Debug, Clone)]
+pub struct FixtureCycle {
+    /// The chain of fixtures forming the cycle (e.g., ["A", "B", "C", "A"]).
+    pub cycle_path: Vec<String>,
+    /// The fixture where the cycle was detected (first fixture in the cycle).
+    pub fixture: FixtureDefinition,
 }
 
 /// Context for code completion.

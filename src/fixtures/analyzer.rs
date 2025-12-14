@@ -213,6 +213,9 @@ impl FixtureDatabase {
             .entry(file_path)
             .or_default()
             .insert(fixture_name);
+
+        // Invalidate cycle cache since definitions changed
+        self.invalidate_cycle_cache();
     }
 
     /// Visit a statement and extract fixture definitions and usages
@@ -365,6 +368,23 @@ impl FixtureDatabase {
             let (start_char, end_char) = self.find_function_name_position(content, line, func_name);
 
             let is_third_party = file_path.to_string_lossy().contains("site-packages");
+
+            // Fixtures can depend on other fixtures - collect dependencies first
+            let mut declared_params: HashSet<String> = HashSet::new();
+            let mut dependencies: Vec<String> = Vec::new();
+            declared_params.insert("self".to_string());
+            declared_params.insert("request".to_string());
+            declared_params.insert(func_name.to_string());
+
+            for arg in Self::all_args(args) {
+                let arg_name = arg.def.arg.as_str();
+                declared_params.insert(arg_name.to_string());
+                // Track as dependency if it's not self/request (these are special)
+                if arg_name != "self" && arg_name != "request" {
+                    dependencies.push(arg_name.to_string());
+                }
+            }
+
             let definition = FixtureDefinition {
                 name: fixture_name.clone(),
                 file_path: file_path.clone(),
@@ -374,19 +394,14 @@ impl FixtureDatabase {
                 docstring,
                 return_type,
                 is_third_party,
+                dependencies: dependencies.clone(),
             };
 
             self.record_fixture_definition(definition);
 
-            // Fixtures can depend on other fixtures - record these as usages too
-            let mut declared_params: HashSet<String> = HashSet::new();
-            declared_params.insert("self".to_string());
-            declared_params.insert("request".to_string());
-            declared_params.insert(func_name.to_string());
-
+            // Record each dependency as a usage
             for arg in Self::all_args(args) {
                 let arg_name = arg.def.arg.as_str();
-                declared_params.insert(arg_name.to_string());
 
                 if arg_name != "self" && arg_name != "request" {
                     let arg_line =
@@ -518,6 +533,7 @@ impl FixtureDatabase {
                                 docstring: None,
                                 return_type: None,
                                 is_third_party,
+                                dependencies: Vec::new(), // Assignment-style fixtures don't have explicit dependencies
                             };
 
                             self.record_fixture_definition(definition);

@@ -294,6 +294,15 @@ enum FixtureCommands {
         #[arg(long, conflicts_with = "skip_unused")]
         only_unused: bool,
     },
+    /// Check for unused fixtures (exits with code 1 if found)
+    Unused {
+        /// Path to the directory containing test files
+        path: PathBuf,
+
+        /// Output format: "text" (default) or "json"
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
 }
 
 #[tokio::main]
@@ -308,6 +317,9 @@ async fn main() {
                 only_unused,
             } => {
                 handle_fixtures_list(path, skip_unused, only_unused);
+            }
+            FixtureCommands::Unused { path, format } => {
+                handle_fixtures_unused(path, &format);
             }
         },
         None => {
@@ -349,6 +361,97 @@ fn handle_fixtures_list(path: PathBuf, skip_unused: bool, only_unused: bool) {
 
     // Print the tree
     fixture_db.print_fixtures_tree(&canonical_path, skip_unused, only_unused);
+}
+
+fn handle_fixtures_unused(path: PathBuf, format: &str) {
+    use colored::Colorize;
+
+    // Convert to absolute path
+    let absolute_path = if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(&path)
+    };
+
+    if !absolute_path.exists() {
+        eprintln!("Error: Path does not exist: {}", absolute_path.display());
+        std::process::exit(1);
+    }
+
+    if !absolute_path.is_dir() {
+        eprintln!(
+            "Error: Path is not a directory: {}",
+            absolute_path.display()
+        );
+        std::process::exit(1);
+    }
+
+    // Canonicalize the path to resolve symlinks and relative components
+    let canonical_path = absolute_path.canonicalize().unwrap_or(absolute_path);
+
+    // Create a fixture database and scan the directory
+    let fixture_db = FixtureDatabase::new();
+    fixture_db.scan_workspace(&canonical_path);
+
+    // Get unused fixtures
+    let unused = fixture_db.get_unused_fixtures();
+
+    if unused.is_empty() {
+        if format == "json" {
+            println!("[]");
+        } else {
+            println!("{}", "No unused fixtures found.".green());
+        }
+        std::process::exit(0);
+    }
+
+    // Output in requested format
+    if format == "json" {
+        let json_output: Vec<serde_json::Value> = unused
+            .iter()
+            .map(|(file_path, fixture_name)| {
+                let relative_path = file_path
+                    .strip_prefix(&canonical_path)
+                    .unwrap_or(file_path)
+                    .to_string_lossy()
+                    .to_string();
+                serde_json::json!({
+                    "file": relative_path,
+                    "fixture": fixture_name
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&json_output).unwrap());
+    } else {
+        println!(
+            "{} {} unused fixture(s):\n",
+            "Found".red().bold(),
+            unused.len()
+        );
+
+        for (file_path, fixture_name) in &unused {
+            let relative_path = file_path
+                .strip_prefix(&canonical_path)
+                .unwrap_or(file_path)
+                .to_string_lossy();
+            println!(
+                "  {} {} in {}",
+                "•".red(),
+                fixture_name.yellow(),
+                relative_path.dimmed()
+            );
+        }
+
+        println!(
+            "\n{}",
+            "Tip: Remove unused fixtures or add tests that use them.".dimmed()
+        );
+    }
+
+    // Exit with code 1 to signal unused fixtures found (useful for CI)
+    std::process::exit(1);
 }
 
 async fn start_lsp_server() {

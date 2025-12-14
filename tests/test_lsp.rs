@@ -21,6 +21,7 @@ fn test_hover_content_with_leading_newline() {
         docstring: Some("This is a test fixture.\n\nIt does something useful.".to_string()),
         return_type: None,
         is_third_party: false,
+        dependencies: vec![],
     };
 
     // Build hover content (same logic as hover method)
@@ -84,6 +85,7 @@ fn test_hover_content_structure_without_docstring() {
         docstring: None,
         return_type: None,
         is_third_party: false,
+        dependencies: vec![],
     };
 
     // Build hover content

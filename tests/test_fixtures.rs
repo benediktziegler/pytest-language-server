@@ -8664,3 +8664,286 @@ def test_something(existing_param):
     assert_eq!(info.line, 2);
     assert!(info.needs_comma);
 }
+
+// ============ Cycle Detection Tests ============
+
+#[test]
+#[timeout(30000)]
+fn test_cycle_detection_simple_cycle() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def fixture_a(fixture_b):
+    return "a"
+
+@pytest.fixture
+def fixture_b(fixture_a):
+    return "b"
+"#;
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    let cycles = db.detect_fixture_cycles();
+    assert!(!cycles.is_empty(), "Should detect the A->B->A cycle");
+
+    // Check the cycle contains both fixtures
+    let cycle = &cycles[0];
+    assert!(cycle.cycle_path.contains(&"fixture_a".to_string()));
+    assert!(cycle.cycle_path.contains(&"fixture_b".to_string()));
+}
+
+#[test]
+#[timeout(30000)]
+fn test_cycle_detection_three_node_cycle() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def fixture_a(fixture_b):
+    return "a"
+
+@pytest.fixture
+def fixture_b(fixture_c):
+    return "b"
+
+@pytest.fixture
+def fixture_c(fixture_a):
+    return "c"
+"#;
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    let cycles = db.detect_fixture_cycles();
+    assert!(!cycles.is_empty(), "Should detect the A->B->C->A cycle");
+
+    // The cycle should contain all three fixtures
+    let cycle = &cycles[0];
+    assert!(
+        cycle.cycle_path.len() >= 3,
+        "Cycle should have at least 3 nodes"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_cycle_detection_no_cycle() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def base_fixture():
+    return "base"
+
+@pytest.fixture
+def dependent_fixture(base_fixture):
+    return base_fixture + "_dep"
+
+@pytest.fixture
+def top_fixture(dependent_fixture):
+    return dependent_fixture + "_top"
+"#;
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    let cycles = db.detect_fixture_cycles();
+    assert!(cycles.is_empty(), "Should not detect any cycles in a DAG");
+}
+
+#[test]
+#[timeout(30000)]
+fn test_cycle_detection_self_referencing() {
+    let db = FixtureDatabase::new();
+
+    // Self-referencing fixture (same name as parameter) - this is actually valid
+    // in pytest when overriding a parent fixture, but we detect it as a cycle
+    // Note: In practice, pytest resolves this by looking up the conftest hierarchy
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture(my_fixture):
+    return my_fixture + "_modified"
+"#;
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    let cycles = db.detect_fixture_cycles();
+    // Self-reference creates a cycle A->A
+    assert!(
+        !cycles.is_empty(),
+        "Should detect self-referencing as a cycle"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_cycle_detection_caching() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def fixture_a(fixture_b):
+    return "a"
+
+@pytest.fixture
+def fixture_b(fixture_a):
+    return "b"
+"#;
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    // First call computes cycles
+    let cycles1 = db.detect_fixture_cycles();
+    assert!(!cycles1.is_empty());
+
+    // Second call should use cache (same Arc)
+    let cycles2 = db.detect_fixture_cycles();
+    assert_eq!(cycles1.len(), cycles2.len());
+
+    // Add new content to invalidate cache
+    let content2 = r#"
+import pytest
+
+@pytest.fixture
+def standalone():
+    return "standalone"
+"#;
+    let path2 = PathBuf::from("/tmp/test/other.py");
+    db.analyze_file(path2, content2);
+
+    // Cache should be invalidated, cycles recalculated
+    let cycles3 = db.detect_fixture_cycles();
+    // Original cycle should still be detected
+    assert!(!cycles3.is_empty());
+}
+
+#[test]
+#[timeout(30000)]
+fn test_cycle_detection_in_file() {
+    let db = FixtureDatabase::new();
+
+    let content1 = r#"
+import pytest
+
+@pytest.fixture
+def fixture_a(fixture_b):
+    return "a"
+
+@pytest.fixture
+def fixture_b(fixture_a):
+    return "b"
+"#;
+
+    let content2 = r#"
+import pytest
+
+@pytest.fixture
+def standalone():
+    return "standalone"
+"#;
+
+    let path1 = PathBuf::from("/tmp/test/conftest.py");
+    let path2 = PathBuf::from("/tmp/test/other.py");
+    db.analyze_file(path1.clone(), content1);
+    db.analyze_file(path2.clone(), content2);
+
+    // Cycles in file1
+    let cycles_file1 = db.detect_fixture_cycles_in_file(&path1);
+    assert!(
+        !cycles_file1.is_empty(),
+        "Should find cycles in conftest.py"
+    );
+
+    // No cycles in file2
+    let cycles_file2 = db.detect_fixture_cycles_in_file(&path2);
+    assert!(
+        cycles_file2.is_empty(),
+        "Should not find cycles in other.py"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_cycle_detection_with_external_dependencies() {
+    let db = FixtureDatabase::new();
+
+    // Fixtures with dependencies on unknown fixtures (like third-party)
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture(unknown_fixture, another_unknown):
+    return "my"
+
+@pytest.fixture
+def other_fixture(my_fixture):
+    return "other"
+"#;
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    // No cycles - unknown_fixture is not in the graph
+    let cycles = db.detect_fixture_cycles();
+    assert!(
+        cycles.is_empty(),
+        "Unknown fixtures should not cause false positive cycles"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_cycle_detection_multiple_independent_cycles() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+# Cycle 1: a -> b -> a
+@pytest.fixture
+def cycle1_a(cycle1_b):
+    return "1a"
+
+@pytest.fixture
+def cycle1_b(cycle1_a):
+    return "1b"
+
+# Cycle 2: x -> y -> z -> x
+@pytest.fixture
+def cycle2_x(cycle2_y):
+    return "2x"
+
+@pytest.fixture
+def cycle2_y(cycle2_z):
+    return "2y"
+
+@pytest.fixture
+def cycle2_z(cycle2_x):
+    return "2z"
+"#;
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    let cycles = db.detect_fixture_cycles();
+    // Should detect both cycles (may be reported as 2+ depending on detection order)
+    assert!(
+        cycles.len() >= 2,
+        "Should detect multiple independent cycles, got {}",
+        cycles.len()
+    );
+}

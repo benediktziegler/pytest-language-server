@@ -18,7 +18,8 @@ mod undeclared;
 
 #[allow(unused_imports)] // ParamInsertionInfo re-exported for public API via lib.rs
 pub use types::{
-    CompletionContext, FixtureDefinition, FixtureUsage, ParamInsertionInfo, UndeclaredFixture,
+    CompletionContext, FixtureCycle, FixtureDefinition, FixtureUsage, ParamInsertionInfo,
+    UndeclaredFixture,
 };
 
 use dashmap::DashMap;
@@ -36,6 +37,10 @@ type LineIndexCacheEntry = (u64, Arc<Vec<usize>>);
 /// Cache entry for parsed AST: (content_hash, ast).
 /// The content hash is used to invalidate the cache when file content changes.
 type AstCacheEntry = (u64, Arc<rustpython_parser::ast::Mod>);
+
+/// Cache entry for fixture cycles: (definitions_version, cycles).
+/// The version is incremented when definitions change to invalidate the cache.
+type CycleCacheEntry = (u64, Arc<Vec<types::FixtureCycle>>);
 
 /// The central database for fixture definitions and usages.
 ///
@@ -63,6 +68,12 @@ pub struct FixtureDatabase {
     /// Cache of parsed AST for files to avoid re-parsing.
     /// Stores (content_hash, ast) to invalidate when content changes.
     pub ast_cache: Arc<DashMap<PathBuf, AstCacheEntry>>,
+    /// Version counter for definitions, incremented on each change.
+    /// Used to invalidate cycle detection cache.
+    pub definitions_version: Arc<std::sync::atomic::AtomicU64>,
+    /// Cache of detected fixture cycles.
+    /// Stores (definitions_version, cycles) to invalidate when definitions change.
+    pub cycle_cache: Arc<DashMap<(), CycleCacheEntry>>,
 }
 
 impl Default for FixtureDatabase {
@@ -84,7 +95,16 @@ impl FixtureDatabase {
             canonical_path_cache: Arc::new(DashMap::new()),
             line_index_cache: Arc::new(DashMap::new()),
             ast_cache: Arc::new(DashMap::new()),
+            definitions_version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            cycle_cache: Arc::new(DashMap::new()),
         }
+    }
+
+    /// Increment the definitions version to invalidate cycle cache.
+    /// Called whenever fixture definitions are modified.
+    pub(crate) fn invalidate_cycle_cache(&self) {
+        self.definitions_version
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Get canonical path with caching to avoid repeated filesystem calls.

@@ -282,13 +282,13 @@ RUST_LOG=debug cargo test          # Run with debug logging
 
 ### Test Coverage
 
-- **332 total tests passing** (as of latest)
-  - 218 integration tests in `tests/test_fixtures.rs` (FixtureDatabase API)
-  - 59 integration tests in `tests/test_lsp.rs` (LSP protocol handlers)
-  - 32 integration tests in `tests/test_e2e.rs` (End-to-end CLI and workspace tests)
-  - 9 unit tests in `tests/test_decorators.rs` (Decorator utilities)
+- **356 total tests passing** (as of latest)
+  - 226 integration tests in `tests/test_fixtures.rs` (FixtureDatabase API)
+  - 63 integration tests in `tests/test_lsp.rs` (LSP protocol handlers)
+  - 37 integration tests in `tests/test_e2e.rs` (End-to-end CLI and workspace tests)
+  - 11 unit tests in `tests/test_decorators.rs` (Decorator utilities)
   - 9 tests in `tests/test_lsp_performance.rs` (Performance and caching)
-  - 5 embedded unit tests in `src/fixtures/string_utils.rs`
+  - 10 embedded unit tests in `src/fixtures/` modules
 
 **Key test areas:**
 
@@ -409,6 +409,25 @@ Options:
 - `--skip-unused`: Filter out unused fixtures from the output
 - `--only-unused`: Show only unused fixtures (conflicts with --skip-unused)
 
+**Fixtures Unused Command**:
+```bash
+# Find unused fixtures (text output)
+pytest-language-server fixtures unused <path>
+
+# JSON output for CI/programmatic use
+pytest-language-server fixtures unused <path> --format json
+
+# Example
+pytest-language-server fixtures unused tests/test_project
+pytest-language-server fixtures unused tests/test_project --format json
+```
+
+The `fixtures unused` command:
+- Lists all unused fixtures in the project
+- Exits with code 1 if unused fixtures are found (CI-friendly)
+- Exits with code 0 if all fixtures are used
+- Supports `--format text` (default) or `--format json` output
+
 **Other Commands**:
 ```bash
 # Show version
@@ -423,6 +442,7 @@ pytest-language-server fixtures list --help
 The CLI uses a subcommand structure to support future expansion:
 - `fixtures` namespace - contains fixture-related commands
   - `list` - displays fixtures in tree format
+  - `unused` - finds unused fixtures with CI-friendly exit codes
 - More namespaces can be added (e.g., `config`, `analyze`, etc.)
 
 ### Version Bumping

@@ -397,6 +397,49 @@ This command is useful for:
 - **Understanding fixture organization** and hierarchy
 - **Documentation** - visualizing available fixtures for developers
 
+### Fixtures Unused
+
+Find unused fixtures in your test suite, with CI-friendly exit codes:
+
+```bash
+# List unused fixtures (text format)
+pytest-language-server fixtures unused tests/
+
+# JSON output for programmatic use
+pytest-language-server fixtures unused tests/ --format json
+```
+
+**Exit codes:**
+- `0`: All fixtures are used
+- `1`: Unused fixtures found
+
+Example text output:
+```
+Found 4 unused fixture(s):
+
+  • iterator_fixture in conftest.py
+  • auto_cleanup in utils/conftest.py
+  • temp_dir in utils/conftest.py
+  • temp_file in utils/conftest.py
+
+Tip: Remove unused fixtures or add tests that use them.
+```
+
+Example JSON output:
+```json
+[
+  {"file": "conftest.py", "fixture": "iterator_fixture"},
+  {"file": "utils/conftest.py", "fixture": "auto_cleanup"},
+  {"file": "utils/conftest.py", "fixture": "temp_dir"},
+  {"file": "utils/conftest.py", "fixture": "temp_file"}
+]
+```
+
+This command is ideal for:
+- **CI/CD pipelines** - fail builds when unused fixtures accumulate
+- **Code cleanup** - identify dead code in test infrastructure
+- **Linting** - integrate with pre-commit hooks or quality gates
+
 ## Supported Fixture Patterns
 
 ### Decorator Style

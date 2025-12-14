@@ -347,4 +347,35 @@ impl FixtureDatabase {
             false
         }
     }
+
+    /// Get all unused fixtures (fixtures with zero usages).
+    /// Returns a vector of (file_path, fixture_name) tuples sorted by path then name.
+    /// Excludes third-party fixtures from site-packages.
+    pub fn get_unused_fixtures(&self) -> Vec<(PathBuf, String)> {
+        let definition_usage_counts = self.compute_definition_usage_counts();
+        let mut unused: Vec<(PathBuf, String)> = Vec::new();
+
+        for entry in self.definitions.iter() {
+            let fixture_name = entry.key();
+            for def in entry.value().iter() {
+                // Skip third-party fixtures
+                if def.is_third_party {
+                    continue;
+                }
+
+                let usage_count = definition_usage_counts
+                    .get(&(def.file_path.clone(), fixture_name.clone()))
+                    .copied()
+                    .unwrap_or(0);
+
+                if usage_count == 0 {
+                    unused.push((def.file_path.clone(), fixture_name.clone()));
+                }
+            }
+        }
+
+        // Sort by file path, then by fixture name for deterministic output
+        unused.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        unused
+    }
 }
