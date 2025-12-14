@@ -2886,3 +2886,185 @@ def fixture_c():
 
     assert_eq!(fixture_count, 3);
 }
+
+// =============================================================================
+// Inlay Hints Tests
+// =============================================================================
+
+#[test]
+#[timeout(30000)]
+fn test_inlay_hints_with_return_type() {
+    use pytest_language_server::FixtureDatabase;
+    use std::path::PathBuf;
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_inlay/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_inlay/test_example.py");
+
+    // Fixture with explicit return type
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def database() -> Database:
+    """Returns a database connection."""
+    return Database()
+
+@pytest.fixture
+def user() -> User:
+    return User("test")
+
+@pytest.fixture
+def config():
+    """No return type annotation."""
+    return {}
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    // Test file using fixtures
+    let test_content = r#"
+def test_example(database, user, config):
+    pass
+"#;
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Get available fixtures and check return types
+    let available = db.get_available_fixtures(&test_path);
+
+    let database_fixture = available.iter().find(|f| f.name == "database");
+    assert!(database_fixture.is_some());
+    assert_eq!(
+        database_fixture.unwrap().return_type,
+        Some("Database".to_string())
+    );
+
+    let user_fixture = available.iter().find(|f| f.name == "user");
+    assert!(user_fixture.is_some());
+    assert_eq!(user_fixture.unwrap().return_type, Some("User".to_string()));
+
+    let config_fixture = available.iter().find(|f| f.name == "config");
+    assert!(config_fixture.is_some());
+    assert_eq!(config_fixture.unwrap().return_type, None);
+
+    // Get usages and verify they are tracked
+    let usages = db.usages.get(&test_path).unwrap();
+    assert_eq!(usages.len(), 3);
+
+    // Verify usage positions
+    let database_usage = usages.iter().find(|u| u.name == "database");
+    assert!(database_usage.is_some());
+    assert_eq!(database_usage.unwrap().line, 2);
+}
+
+#[test]
+#[timeout(30000)]
+fn test_inlay_hints_generator_return_type() {
+    use pytest_language_server::FixtureDatabase;
+    use std::path::PathBuf;
+
+    let db = FixtureDatabase::new();
+    let file_path = PathBuf::from("/tmp/test_inlay_gen/conftest.py");
+
+    // Generator fixture with yield type extraction
+    let content = r#"
+import pytest
+from typing import Generator
+
+@pytest.fixture
+def session() -> Generator[Session, None, None]:
+    """Yields a session."""
+    session = Session()
+    yield session
+    session.close()
+"#;
+    db.analyze_file(file_path.clone(), content);
+
+    let definitions = db.definitions.get("session").unwrap();
+    assert_eq!(definitions.len(), 1);
+    // Should extract the yielded type (Session) from Generator[Session, None, None]
+    assert_eq!(definitions[0].return_type, Some("Session".to_string()));
+}
+
+#[test]
+#[timeout(30000)]
+fn test_inlay_hints_no_duplicates_same_fixture() {
+    use pytest_language_server::FixtureDatabase;
+    use std::path::PathBuf;
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_inlay_dup/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_inlay_dup/test_example.py");
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def db() -> Database:
+    return Database()
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    // Multiple usages of same fixture in different functions
+    let test_content = r#"
+def test_one(db):
+    pass
+
+def test_two(db):
+    pass
+
+def test_three(db):
+    pass
+"#;
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Each usage should be tracked separately
+    let usages = db.usages.get(&test_path).unwrap();
+    assert_eq!(usages.len(), 3);
+
+    // All usages should refer to 'db'
+    assert!(usages.iter().all(|u| u.name == "db"));
+}
+
+#[test]
+#[timeout(30000)]
+fn test_inlay_hints_complex_return_types() {
+    use pytest_language_server::FixtureDatabase;
+    use std::path::PathBuf;
+
+    let db = FixtureDatabase::new();
+    let file_path = PathBuf::from("/tmp/test_inlay_complex/conftest.py");
+
+    let content = r#"
+import pytest
+from typing import Optional, Dict, List
+
+@pytest.fixture
+def optional_user() -> Optional[User]:
+    return None
+
+@pytest.fixture
+def user_map() -> Dict[str, User]:
+    return {}
+
+@pytest.fixture
+def user_list() -> List[User]:
+    return []
+
+@pytest.fixture
+def union_type() -> str | int:
+    return "value"
+"#;
+    db.analyze_file(file_path.clone(), content);
+
+    let optional = db.definitions.get("optional_user").unwrap();
+    assert!(optional[0].return_type.is_some());
+
+    let dict_type = db.definitions.get("user_map").unwrap();
+    assert!(dict_type[0].return_type.is_some());
+
+    let list_type = db.definitions.get("user_list").unwrap();
+    assert!(list_type[0].return_type.is_some());
+
+    let union = db.definitions.get("union_type").unwrap();
+    assert_eq!(union[0].return_type, Some("str | int".to_string()));
+}

@@ -106,6 +106,25 @@ See fixture usage counts directly in your editor:
 - **Real-time updates**: Counts update as you add/remove fixture usages
 - **Local fixtures only**: Only shows lenses for project fixtures, not third-party
 
+### 🏷️ Inlay Hints
+See fixture return types inline without leaving your code:
+- **Type annotations**: Shows return types next to fixture parameters (e.g., `db: Database`)
+- **Explicit types only**: Only displays hints when fixtures have explicit return type annotations
+- **Generator support**: Extracts yielded type from `Generator[T, None, None]` annotations
+- **Non-intrusive**: Hints appear as subtle inline decorations that don't modify your code
+
+Example:
+```python
+# With a fixture defined as:
+@pytest.fixture
+def database() -> Database:
+    return Database()
+
+# In your test, you'll see:
+def test_example(database):  # Shows ": Database" after "database"
+    pass
+```
+
 ### 💡 Code Actions (Quick Fixes)
 One-click fixes for common pytest issues:
 - **Add missing fixture parameters**: Automatically add undeclared fixtures to function signatures

@@ -24,7 +24,7 @@ This ensures the user maintains full control over their git workflow.
 - **Language**: Rust (Edition 2021, MSRV 1.85)
 - **Lines of Code**: ~4,100 lines across modular structure
 - **Architecture**: Async LSP server using tower-lsp-server with CLI support via clap
-- **Key Features**: Fixture go-to-definition, find-references, hover docs, **code completion**, **document symbols**, **workspace symbols**, **code lens**, fixture overriding, undeclared fixture diagnostics, CLI commands, `@pytest.mark.usefixtures` support, `@pytest.mark.parametrize` indirect fixtures
+- **Key Features**: Fixture go-to-definition, find-references, hover docs, **code completion**, **document symbols**, **workspace symbols**, **code lens**, **inlay hints**, fixture overriding, undeclared fixture diagnostics, CLI commands, `@pytest.mark.usefixtures` support, `@pytest.mark.parametrize` indirect fixtures
 
 ## Core Architecture
 
@@ -51,7 +51,8 @@ src/
     ├── completion.rs   # Code completion (~219 lines)
     ├── diagnostics.rs  # Publish diagnostics (~44 lines)
     ├── code_action.rs  # Quick fixes (~171 lines)
-    └── code_lens.rs    # Usage count lenses (~65 lines)
+    ├── code_lens.rs    # Usage count lenses (~65 lines)
+    └── inlay_hint.rs   # Type hints for fixture parameters (~85 lines)
 ```
 
 ### Key Components
@@ -79,6 +80,7 @@ src/
      - `diagnostics.rs` - Undeclared fixture warnings
      - `code_action.rs` - Quick fixes to add missing parameters
      - `code_lens.rs` - Usage count lenses above fixtures
+     - `inlay_hint.rs` - Type hints for fixture parameters
 
 3. **Main** (`src/main.rs`)
    - `LanguageServer` trait implementation delegating to providers

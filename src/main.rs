@@ -130,6 +130,7 @@ impl LanguageServer for Backend {
                 code_lens_provider: Some(CodeLensOptions {
                     resolve_provider: Some(false),
                 }),
+                inlay_hint_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
         })
@@ -223,6 +224,10 @@ impl LanguageServer for Backend {
 
     async fn code_lens(&self, params: CodeLensParams) -> Result<Option<Vec<CodeLens>>> {
         self.handle_code_lens(params).await
+    }
+
+    async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
+        self.handle_inlay_hint(params).await
     }
 
     async fn shutdown(&self) -> Result<()> {
