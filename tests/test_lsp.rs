@@ -3074,3 +3074,493 @@ def union_type() -> str | int:
     let union = db.definitions.get("union_type").unwrap();
     assert_eq!(union[0].return_type, Some("str | int".to_string()));
 }
+
+// =============================================================================
+// Call Hierarchy Tests
+// =============================================================================
+
+#[test]
+#[timeout(30000)]
+fn test_call_hierarchy_prepare_on_fixture_definition() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture(scope="session")
+def db_connection():
+    """Database connection fixture."""
+    return "connection"
+"#;
+    let file_path = PathBuf::from("/tmp/project/conftest.py");
+    db.analyze_file(file_path.clone(), content);
+
+    // Line 5 (0-indexed: 4) is "def db_connection():"
+    // Position on the fixture name (starts at char 4) should find it
+    let definition = db.find_fixture_or_definition_at_position(&file_path, 4, 4);
+    assert!(
+        definition.is_some(),
+        "Should find fixture at definition line"
+    );
+
+    let def = definition.unwrap();
+    assert_eq!(def.name, "db_connection");
+    assert_eq!(def.scope, pytest_language_server::FixtureScope::Session);
+}
+
+#[test]
+#[timeout(30000)]
+fn test_call_hierarchy_incoming_calls() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    // Base fixture
+    let conftest = r#"
+import pytest
+
+@pytest.fixture
+def db_connection():
+    return "connection"
+"#;
+    let conftest_path = PathBuf::from("/tmp/project/conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest);
+
+    // Fixture that depends on db_connection
+    let dependent_conftest = r#"
+import pytest
+
+@pytest.fixture
+def db_session(db_connection):
+    return f"session({db_connection})"
+"#;
+    let dependent_path = PathBuf::from("/tmp/project/tests/conftest.py");
+    db.analyze_file(dependent_path.clone(), dependent_conftest);
+
+    // Test that uses db_connection
+    let test_content = r#"
+def test_database(db_connection):
+    assert db_connection is not None
+"#;
+    let test_path = PathBuf::from("/tmp/project/tests/test_db.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Get definition and find its references (incoming calls)
+    let definition = db.find_fixture_or_definition_at_position(&conftest_path, 4, 4);
+    assert!(
+        definition.is_some(),
+        "Should find fixture at definition line"
+    );
+
+    let refs = db.find_references_for_definition(&definition.unwrap());
+
+    // Should have references from:
+    // 1. The definition itself (conftest.py)
+    // 2. db_session fixture parameter (tests/conftest.py)
+    // 3. test_database test parameter (tests/test_db.py)
+    assert!(
+        refs.len() >= 2,
+        "Should have at least 2 references (excluding definition)"
+    );
+
+    let from_dependent = refs.iter().any(|r| r.file_path == dependent_path);
+    let from_test = refs.iter().any(|r| r.file_path == test_path);
+
+    assert!(
+        from_dependent,
+        "Should have reference from dependent fixture"
+    );
+    assert!(from_test, "Should have reference from test");
+}
+
+#[test]
+#[timeout(30000)]
+fn test_call_hierarchy_outgoing_calls() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def base_fixture():
+    return "base"
+
+@pytest.fixture
+def mid_fixture(base_fixture):
+    return f"mid({base_fixture})"
+
+@pytest.fixture
+def top_fixture(mid_fixture, base_fixture):
+    return f"top({mid_fixture}, {base_fixture})"
+"#;
+    let file_path = PathBuf::from("/tmp/project/conftest.py");
+    db.analyze_file(file_path.clone(), content);
+
+    // top_fixture depends on mid_fixture and base_fixture
+    let top_def = db.definitions.get("top_fixture").unwrap();
+    let top = &top_def[0];
+
+    assert_eq!(top.dependencies.len(), 2);
+    assert!(top.dependencies.contains(&"mid_fixture".to_string()));
+    assert!(top.dependencies.contains(&"base_fixture".to_string()));
+
+    // mid_fixture depends only on base_fixture
+    let mid_def = db.definitions.get("mid_fixture").unwrap();
+    let mid = &mid_def[0];
+
+    assert_eq!(mid.dependencies.len(), 1);
+    assert!(mid.dependencies.contains(&"base_fixture".to_string()));
+
+    // base_fixture has no dependencies
+    let base_def = db.definitions.get("base_fixture").unwrap();
+    let base = &base_def[0];
+
+    assert_eq!(base.dependencies.len(), 0);
+}
+
+#[test]
+#[timeout(30000)]
+fn test_call_hierarchy_with_fixture_override() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    // Parent fixture
+    let parent_content = r#"
+import pytest
+
+@pytest.fixture
+def shared_fixture():
+    return "parent"
+"#;
+    let parent_path = PathBuf::from("/tmp/project/conftest.py");
+    db.analyze_file(parent_path.clone(), parent_content);
+
+    // Child fixture that overrides and depends on parent
+    let child_content = r#"
+import pytest
+
+@pytest.fixture
+def shared_fixture(shared_fixture):
+    return f"child({shared_fixture})"
+"#;
+    let child_path = PathBuf::from("/tmp/project/tests/conftest.py");
+    db.analyze_file(child_path.clone(), child_content);
+
+    // Child fixture depends on parent's shared_fixture
+    let child_def = db.definitions.get("shared_fixture").unwrap();
+    let child = child_def
+        .iter()
+        .find(|d| d.file_path == child_path)
+        .unwrap();
+
+    assert_eq!(child.dependencies.len(), 1);
+    assert!(child.dependencies.contains(&"shared_fixture".to_string()));
+}
+
+#[test]
+#[timeout(30000)]
+fn test_call_hierarchy_find_containing_function() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def outer_fixture():
+    return "outer"
+
+def test_example(outer_fixture):
+    result = outer_fixture
+    assert result is not None
+"#;
+    let file_path = PathBuf::from("/tmp/project/test_example.py");
+    db.analyze_file(file_path.clone(), content);
+
+    // Line 9 (1-indexed) is inside test_example
+    let containing = db.find_containing_function(&file_path, 9);
+    assert_eq!(containing, Some("test_example".to_string()));
+
+    // Line 5 (1-indexed) is inside outer_fixture
+    let containing = db.find_containing_function(&file_path, 5);
+    assert_eq!(containing, Some("outer_fixture".to_string()));
+}
+
+#[test]
+#[timeout(30000)]
+fn test_call_hierarchy_deep_dependency_chain() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def level_1():
+    return 1
+
+@pytest.fixture
+def level_2(level_1):
+    return level_1 + 1
+
+@pytest.fixture
+def level_3(level_2):
+    return level_2 + 1
+
+@pytest.fixture
+def level_4(level_3, level_1):
+    return level_3 + level_1
+"#;
+    let file_path = PathBuf::from("/tmp/project/conftest.py");
+    db.analyze_file(file_path.clone(), content);
+
+    // Verify the dependency chain
+    let l4 = &db.definitions.get("level_4").unwrap()[0];
+    assert_eq!(l4.dependencies.len(), 2);
+    assert!(l4.dependencies.contains(&"level_3".to_string()));
+    assert!(l4.dependencies.contains(&"level_1".to_string()));
+
+    let l3 = &db.definitions.get("level_3").unwrap()[0];
+    assert_eq!(l3.dependencies.len(), 1);
+    assert!(l3.dependencies.contains(&"level_2".to_string()));
+
+    let l2 = &db.definitions.get("level_2").unwrap()[0];
+    assert_eq!(l2.dependencies.len(), 1);
+    assert!(l2.dependencies.contains(&"level_1".to_string()));
+
+    let l1 = &db.definitions.get("level_1").unwrap()[0];
+    assert_eq!(l1.dependencies.len(), 0);
+}
+
+// =============================================================================
+// Go-to-Implementation Tests (Yield Statement Navigation)
+// =============================================================================
+
+#[test]
+#[timeout(30000)]
+fn test_goto_implementation_yield_fixture() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def database_session():
+    """Create a database session with cleanup."""
+    session = create_session()
+    yield session
+    session.close()
+"#;
+    let file_path = PathBuf::from("/tmp/project/conftest.py");
+    db.analyze_file(file_path.clone(), content);
+
+    let def = &db.definitions.get("database_session").unwrap()[0];
+
+    // Yield is on line 8 (1-indexed)
+    assert_eq!(def.yield_line, Some(8));
+}
+
+#[test]
+#[timeout(30000)]
+fn test_goto_implementation_non_yield_fixture() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def simple_fixture():
+    return "value"
+"#;
+    let file_path = PathBuf::from("/tmp/project/conftest.py");
+    db.analyze_file(file_path.clone(), content);
+
+    let def = &db.definitions.get("simple_fixture").unwrap()[0];
+
+    // No yield statement
+    assert_eq!(def.yield_line, None);
+}
+
+#[test]
+#[timeout(30000)]
+fn test_goto_implementation_yield_in_with_block() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def file_handle():
+    with open("test.txt") as f:
+        yield f
+"#;
+    let file_path = PathBuf::from("/tmp/project/conftest.py");
+    db.analyze_file(file_path.clone(), content);
+
+    let def = &db.definitions.get("file_handle").unwrap()[0];
+
+    // Yield is on line 7 (1-indexed), inside with block
+    assert_eq!(def.yield_line, Some(7));
+}
+
+#[test]
+#[timeout(30000)]
+fn test_goto_implementation_yield_in_try_finally() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def resource():
+    resource = acquire_resource()
+    try:
+        yield resource
+    finally:
+        resource.release()
+"#;
+    let file_path = PathBuf::from("/tmp/project/conftest.py");
+    db.analyze_file(file_path.clone(), content);
+
+    let def = &db.definitions.get("resource").unwrap()[0];
+
+    // Yield is on line 8 (1-indexed), inside try block
+    assert_eq!(def.yield_line, Some(8));
+}
+
+#[test]
+#[timeout(30000)]
+fn test_goto_implementation_multiple_fixtures_with_yield() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def first_resource():
+    yield "first"
+
+@pytest.fixture
+def second_resource():
+    yield "second"
+
+@pytest.fixture
+def third_no_yield():
+    return "third"
+"#;
+    let file_path = PathBuf::from("/tmp/project/conftest.py");
+    db.analyze_file(file_path.clone(), content);
+
+    let first = &db.definitions.get("first_resource").unwrap()[0];
+    assert_eq!(first.yield_line, Some(6));
+
+    let second = &db.definitions.get("second_resource").unwrap()[0];
+    assert_eq!(second.yield_line, Some(10));
+
+    let third = &db.definitions.get("third_no_yield").unwrap()[0];
+    assert_eq!(third.yield_line, None);
+}
+
+#[test]
+#[timeout(30000)]
+fn test_goto_implementation_fixture_definition_lookup() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let conftest = r#"
+import pytest
+
+@pytest.fixture
+def yielding_fixture():
+    setup()
+    yield "value"
+    teardown()
+"#;
+    let conftest_path = PathBuf::from("/tmp/project/conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest);
+
+    let test = r#"
+def test_uses_yield(yielding_fixture):
+    assert yielding_fixture == "value"
+"#;
+    let test_path = PathBuf::from("/tmp/project/test_example.py");
+    db.analyze_file(test_path.clone(), test);
+
+    // Looking up from test file should find the fixture with yield_line
+    let def = db.find_fixture_definition(&test_path, 1, 20);
+    assert!(def.is_some());
+
+    let fixture = def.unwrap();
+    assert_eq!(fixture.name, "yielding_fixture");
+    assert_eq!(fixture.yield_line, Some(7));
+}
+
+#[test]
+#[timeout(30000)]
+fn test_goto_implementation_async_yield_fixture() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+import pytest_asyncio
+
+@pytest_asyncio.fixture
+async def async_db():
+    db = await create_db()
+    yield db
+    await db.close()
+"#;
+    let file_path = PathBuf::from("/tmp/project/conftest.py");
+    db.analyze_file(file_path.clone(), content);
+
+    // Async fixtures with yield should also be detected
+    let def = &db.definitions.get("async_db").unwrap()[0];
+    assert_eq!(def.yield_line, Some(8));
+}
+
+#[test]
+#[timeout(30000)]
+fn test_goto_implementation_yield_with_conditional() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def conditional_resource(request):
+    if request.param:
+        yield "value"
+    else:
+        yield None
+"#;
+    let file_path = PathBuf::from("/tmp/project/conftest.py");
+    db.analyze_file(file_path.clone(), content);
+
+    let def = &db.definitions.get("conditional_resource").unwrap()[0];
+    // Should find the first yield
+    assert!(def.yield_line.is_some());
+    // First yield is on line 7
+    assert_eq!(def.yield_line, Some(7));
+}

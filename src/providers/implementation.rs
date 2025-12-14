@@ -33,8 +33,8 @@ impl Backend {
                 file_path, position.line, position.character
             );
 
-            // First find the fixture definition
-            if let Some(definition) = self.fixture_db.find_fixture_definition(
+            // First find the fixture definition (works on both definitions and usages)
+            if let Some(definition) = self.fixture_db.find_fixture_or_definition_at_position(
                 &file_path,
                 position.line,
                 position.character,

@@ -191,6 +191,8 @@ impl LanguageServer for Backend {
         if let Some(file_path) = self.uri_to_path(&uri) {
             // Clean up cached data for this file to prevent unbounded memory growth
             self.fixture_db.cleanup_file_cache(&file_path);
+            // Clean up URI cache entry
+            self.uri_cache.remove(&file_path);
         }
     }
 

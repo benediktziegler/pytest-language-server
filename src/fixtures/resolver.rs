@@ -90,6 +90,42 @@ impl FixtureDatabase {
         None
     }
 
+    /// Find fixture definition at a given position, checking both usages and definitions.
+    ///
+    /// This is useful for Call Hierarchy where we want to work on both fixture definition
+    /// lines and fixture usage sites.
+    pub fn find_fixture_or_definition_at_position(
+        &self,
+        file_path: &Path,
+        line: u32,
+        character: u32,
+    ) -> Option<FixtureDefinition> {
+        // First try to find a usage and resolve it to definition
+        if let Some(def) = self.find_fixture_definition(file_path, line, character) {
+            return Some(def);
+        }
+
+        // If not a usage, check if we're on a fixture definition line
+        let target_line = (line + 1) as usize; // Convert from 0-based to 1-based
+        let content = self.get_file_content(file_path)?;
+        let line_content = content.lines().nth(target_line.saturating_sub(1))?;
+        let word_at_cursor = self.extract_word_at_position(line_content, character as usize)?;
+
+        // Check if this word matches a fixture definition at this line
+        if let Some(definitions) = self.definitions.get(&word_at_cursor) {
+            for def in definitions.iter() {
+                if def.file_path == file_path && def.line == target_line {
+                    // Verify cursor is within the fixture name
+                    if character as usize >= def.start_char && (character as usize) < def.end_char {
+                        return Some(def.clone());
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
     /// Public method to get the fixture definition at a specific line and name
     pub fn get_definition_at_line(
         &self,
@@ -308,7 +344,9 @@ impl FixtureDatabase {
         all_references
     }
 
-    /// Find all references that resolve to a specific fixture definition
+    /// Find all references that resolve to a specific fixture definition.
+    /// Uses the usage_by_fixture reverse index for O(m) lookup where m = usages of this fixture,
+    /// instead of O(n) iteration over all usages.
     pub fn find_references_for_definition(
         &self,
         definition: &FixtureDefinition,
@@ -320,47 +358,45 @@ impl FixtureDatabase {
 
         let mut matching_references = Vec::new();
 
-        for entry in self.usages.iter() {
-            let file_path = entry.key();
-            let usages = entry.value();
+        // Use reverse index for O(m) lookup instead of O(n) iteration over all usages
+        let Some(usages_for_fixture) = self.usage_by_fixture.get(&definition.name) else {
+            info!("No references found for fixture: {}", definition.name);
+            return matching_references;
+        };
 
-            for usage in usages.iter() {
-                if usage.name == definition.name {
-                    let fixture_def_at_line =
-                        self.get_fixture_definition_at_line(file_path, usage.line);
+        for (file_path, usage) in usages_for_fixture.iter() {
+            let fixture_def_at_line = self.get_fixture_definition_at_line(file_path, usage.line);
 
-                    let resolved_def = if let Some(ref current_def) = fixture_def_at_line {
-                        if current_def.name == usage.name {
-                            debug!(
-                                "Usage at {:?}:{} is self-referencing, excluding definition at line {}",
-                                file_path, usage.line, current_def.line
-                            );
-                            self.find_closest_definition_excluding(
-                                file_path,
-                                &usage.name,
-                                Some(current_def),
-                            )
-                        } else {
-                            self.find_closest_definition(file_path, &usage.name)
-                        }
-                    } else {
-                        self.find_closest_definition(file_path, &usage.name)
-                    };
+            let resolved_def = if let Some(ref current_def) = fixture_def_at_line {
+                if current_def.name == usage.name {
+                    debug!(
+                        "Usage at {:?}:{} is self-referencing, excluding definition at line {}",
+                        file_path, usage.line, current_def.line
+                    );
+                    self.find_closest_definition_excluding(
+                        file_path,
+                        &usage.name,
+                        Some(current_def),
+                    )
+                } else {
+                    self.find_closest_definition(file_path, &usage.name)
+                }
+            } else {
+                self.find_closest_definition(file_path, &usage.name)
+            };
 
-                    if let Some(resolved_def) = resolved_def {
-                        if resolved_def == *definition {
-                            debug!(
-                                "Usage at {:?}:{} resolves to our definition",
-                                file_path, usage.line
-                            );
-                            matching_references.push(usage.clone());
-                        } else {
-                            debug!(
-                                "Usage at {:?}:{} resolves to different definition at {:?}:{}",
-                                file_path, usage.line, resolved_def.file_path, resolved_def.line
-                            );
-                        }
-                    }
+            if let Some(resolved_def) = resolved_def {
+                if resolved_def == *definition {
+                    debug!(
+                        "Usage at {:?}:{} resolves to our definition",
+                        file_path, usage.line
+                    );
+                    matching_references.push(usage.clone());
+                } else {
+                    debug!(
+                        "Usage at {:?}:{} resolves to different definition at {:?}:{}",
+                        file_path, usage.line, resolved_def.file_path, resolved_def.line
+                    );
                 }
             }
         }
@@ -380,8 +416,42 @@ impl FixtureDatabase {
             .unwrap_or_default()
     }
 
-    /// Get all available fixtures for a given file
+    /// Get all available fixtures for a given file.
+    /// Results are cached with version-based invalidation for performance.
+    /// Returns Arc to avoid cloning the potentially large Vec on cache hits.
     pub fn get_available_fixtures(&self, file_path: &Path) -> Vec<FixtureDefinition> {
+        use std::sync::Arc;
+
+        // Canonicalize path for consistent cache keys
+        let file_path = self.get_canonical_path(file_path.to_path_buf());
+
+        // Check cache first
+        let current_version = self
+            .definitions_version
+            .load(std::sync::atomic::Ordering::SeqCst);
+
+        if let Some(cached) = self.available_fixtures_cache.get(&file_path) {
+            let (cached_version, cached_fixtures) = cached.value();
+            if *cached_version == current_version {
+                // Return cloned Vec from Arc (cheap reference count increment)
+                return cached_fixtures.as_ref().clone();
+            }
+        }
+
+        // Compute available fixtures
+        let available_fixtures = self.compute_available_fixtures(&file_path);
+
+        // Store in cache
+        self.available_fixtures_cache.insert(
+            file_path,
+            (current_version, Arc::new(available_fixtures.clone())),
+        );
+
+        available_fixtures
+    }
+
+    /// Internal method to compute available fixtures without caching.
+    fn compute_available_fixtures(&self, file_path: &Path) -> Vec<FixtureDefinition> {
         let mut available_fixtures = Vec::new();
         let mut seen_names = HashSet::new();
 
@@ -1076,13 +1146,12 @@ impl FixtureDatabase {
     pub fn find_containing_function(&self, file_path: &Path, line: usize) -> Option<String> {
         let content = self.get_file_content(file_path)?;
 
-        // Parse the file to find function definitions
-        let parsed =
-            rustpython_parser::parse(&content, rustpython_parser::Mode::Module, "").ok()?;
+        // Use cached AST to avoid re-parsing
+        let parsed = self.get_parsed_ast(file_path, &content)?;
 
-        if let rustpython_parser::ast::Mod::Module(module) = parsed {
-            // Build line index for position calculations
-            let line_index = Self::build_line_index(&content);
+        if let rustpython_parser::ast::Mod::Module(module) = parsed.as_ref() {
+            // Use cached line index for position calculations
+            let line_index = self.get_line_index(file_path, &content);
 
             for stmt in &module.body {
                 if let Some(name) = self.find_function_containing_line(stmt, line, &line_index) {

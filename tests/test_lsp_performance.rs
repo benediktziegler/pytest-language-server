@@ -504,3 +504,251 @@ fn test_cleanup_file_cache_handles_nonexistent_file() {
     assert!(db.definitions.is_empty());
     assert!(db.line_index_cache.is_empty());
 }
+
+#[test]
+#[timeout(10000)]
+fn test_usage_by_fixture_reverse_index() {
+    // Test that the usage_by_fixture reverse index is properly maintained
+    let temp_dir = TempDir::new().unwrap();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def shared_fixture():
+    return 42
+
+@pytest.fixture
+def another_fixture(shared_fixture):
+    return shared_fixture + 1
+
+def test_one(shared_fixture):
+    assert shared_fixture == 42
+
+def test_two(shared_fixture, another_fixture):
+    assert shared_fixture == 42
+"#;
+
+    let file_path = create_temp_test_file(&temp_dir, "test_reverse_index.py", content);
+    let canonical_path = file_path.canonicalize().unwrap();
+
+    let db = FixtureDatabase::new();
+    db.analyze_file(file_path.clone(), content);
+
+    // Verify reverse index contains usages for shared_fixture
+    assert!(
+        db.usage_by_fixture.contains_key("shared_fixture"),
+        "usage_by_fixture should track shared_fixture usages"
+    );
+
+    {
+        // Scope the DashMap reference to avoid holding read lock across analyze_file
+        let usages = db.usage_by_fixture.get("shared_fixture").unwrap();
+        // shared_fixture is used in: another_fixture (dependency), test_one, test_two
+        assert_eq!(
+            usages.len(),
+            3,
+            "shared_fixture should have 3 usages (1 fixture dep + 2 tests)"
+        );
+
+        // Verify all usages point to the correct file
+        for (path, usage) in usages.iter() {
+            assert_eq!(*path, canonical_path);
+            assert_eq!(usage.name, "shared_fixture");
+        }
+    }
+
+    // Re-analyze with fewer usages - verify cleanup works
+    let updated_content = r#"
+import pytest
+
+@pytest.fixture
+def shared_fixture():
+    return 42
+
+def test_one(shared_fixture):
+    assert shared_fixture == 42
+"#;
+
+    db.analyze_file(file_path.clone(), updated_content);
+
+    // Now should only have 1 usage
+    let usages = db.usage_by_fixture.get("shared_fixture").unwrap();
+    assert_eq!(
+        usages.len(),
+        1,
+        "shared_fixture should now have only 1 usage after re-analysis"
+    );
+}
+
+#[test]
+#[timeout(10000)]
+fn test_available_fixtures_cache() {
+    // Test that get_available_fixtures caches results and invalidates on changes
+    let temp_dir = TempDir::new().unwrap();
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def root_fixture():
+    return "root"
+"#;
+
+    let test_content = r#"
+def test_something(root_fixture):
+    pass
+"#;
+
+    let conftest_path = create_temp_test_file(&temp_dir, "conftest.py", conftest_content);
+    let test_path = create_temp_test_file(&temp_dir, "test_cache.py", test_content);
+    let canonical_test_path = test_path.canonicalize().unwrap();
+
+    let db = FixtureDatabase::new();
+    db.analyze_file(conftest_path.clone(), conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    // First call should compute and cache
+    let fixtures1 = db.get_available_fixtures(&canonical_test_path);
+    assert_eq!(fixtures1.len(), 1);
+    assert_eq!(fixtures1[0].name, "root_fixture");
+
+    // Cache should now contain this file
+    assert!(
+        db.available_fixtures_cache
+            .contains_key(&canonical_test_path),
+        "available_fixtures_cache should contain the file after get_available_fixtures"
+    );
+
+    // Second call should use cache (same result)
+    let fixtures2 = db.get_available_fixtures(&canonical_test_path);
+    assert_eq!(fixtures1.len(), fixtures2.len());
+    assert_eq!(fixtures1[0].name, fixtures2[0].name);
+
+    // Add a new fixture - this should invalidate the cache via version bump
+    let updated_conftest = r#"
+import pytest
+
+@pytest.fixture
+def root_fixture():
+    return "root"
+
+@pytest.fixture
+def new_fixture():
+    return "new"
+"#;
+
+    db.analyze_file(conftest_path.clone(), updated_conftest);
+
+    // Cache should be invalidated, new fixtures should be returned
+    let fixtures3 = db.get_available_fixtures(&canonical_test_path);
+    assert_eq!(
+        fixtures3.len(),
+        2,
+        "Should now have 2 fixtures after cache invalidation"
+    );
+
+    let fixture_names: Vec<&str> = fixtures3.iter().map(|f| f.name.as_str()).collect();
+    assert!(fixture_names.contains(&"root_fixture"));
+    assert!(fixture_names.contains(&"new_fixture"));
+}
+
+#[test]
+#[timeout(10000)]
+fn test_cleanup_file_cache_clears_available_fixtures_cache() {
+    // Test that cleanup_file_cache also removes available_fixtures_cache entries
+    let temp_dir = TempDir::new().unwrap();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return 42
+
+def test_one(my_fixture):
+    pass
+"#;
+
+    let file_path = create_temp_test_file(&temp_dir, "test_cleanup_avail.py", content);
+    let canonical_path = file_path.canonicalize().unwrap();
+
+    let db = FixtureDatabase::new();
+    db.analyze_file(file_path.clone(), content);
+
+    // Trigger caching by calling get_available_fixtures
+    let _ = db.get_available_fixtures(&canonical_path);
+
+    // Verify cache is populated
+    assert!(
+        db.available_fixtures_cache.contains_key(&canonical_path),
+        "available_fixtures_cache should contain the file"
+    );
+
+    // Clean up caches
+    db.cleanup_file_cache(&file_path);
+
+    // Verify available_fixtures_cache is cleared
+    assert!(
+        !db.available_fixtures_cache.contains_key(&canonical_path),
+        "available_fixtures_cache should be empty after cleanup"
+    );
+}
+
+#[test]
+#[timeout(10000)]
+fn test_find_references_uses_reverse_index() {
+    // Test that find_references_for_definition uses the reverse index efficiently
+    let temp_dir = TempDir::new().unwrap();
+
+    let conftest = r#"
+import pytest
+
+@pytest.fixture
+def base_fixture():
+    return "base"
+"#;
+
+    // Create multiple test files that use the fixture
+    let test1 = r#"
+def test_a(base_fixture):
+    pass
+"#;
+    let test2 = r#"
+def test_b(base_fixture):
+    pass
+"#;
+    let test3 = r#"
+def test_c(base_fixture):
+    pass
+"#;
+
+    let _conftest_path = create_temp_test_file(&temp_dir, "conftest.py", conftest);
+    create_temp_test_file(&temp_dir, "test_a.py", test1);
+    create_temp_test_file(&temp_dir, "test_b.py", test2);
+    create_temp_test_file(&temp_dir, "test_c.py", test3);
+
+    let db = FixtureDatabase::new();
+    db.scan_workspace(temp_dir.path());
+
+    // Get the fixture definition
+    let definition = db.definitions.get("base_fixture").unwrap()[0].clone();
+
+    // Find references using the reverse index
+    let references = db.find_references_for_definition(&definition);
+
+    // Should find 3 references (one in each test file)
+    assert_eq!(
+        references.len(),
+        3,
+        "Should find 3 references across test files"
+    );
+
+    // Verify the reverse index has the right data
+    let usage_entries = db.usage_by_fixture.get("base_fixture").unwrap();
+    assert_eq!(
+        usage_entries.len(),
+        3,
+        "Reverse index should have 3 entries"
+    );
+}

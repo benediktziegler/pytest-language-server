@@ -42,6 +42,10 @@ type AstCacheEntry = (u64, Arc<rustpython_parser::ast::Mod>);
 /// The version is incremented when definitions change to invalidate the cache.
 type CycleCacheEntry = (u64, Arc<Vec<types::FixtureCycle>>);
 
+/// Cache entry for available fixtures: (definitions_version, fixtures).
+/// The version is incremented when definitions change to invalidate the cache.
+type AvailableFixturesCacheEntry = (u64, Arc<Vec<FixtureDefinition>>);
+
 /// The central database for fixture definitions and usages.
 ///
 /// Uses `DashMap` for lock-free concurrent access during workspace scanning.
@@ -54,6 +58,9 @@ pub struct FixtureDatabase {
     pub file_definitions: Arc<DashMap<PathBuf, HashSet<String>>>,
     /// Map from file path to fixtures used in that file.
     pub usages: Arc<DashMap<PathBuf, Vec<FixtureUsage>>>,
+    /// Reverse index: fixture name -> (file_path, usage) pairs.
+    /// Used for efficient O(1) lookup in find_references_for_definition.
+    pub usage_by_fixture: Arc<DashMap<String, Vec<(PathBuf, FixtureUsage)>>>,
     /// Cache of file contents for analyzed files (uses Arc for efficient sharing).
     pub file_cache: Arc<DashMap<PathBuf, Arc<String>>>,
     /// Map from file path to undeclared fixtures used in function bodies.
@@ -69,11 +76,14 @@ pub struct FixtureDatabase {
     /// Stores (content_hash, ast) to invalidate when content changes.
     pub ast_cache: Arc<DashMap<PathBuf, AstCacheEntry>>,
     /// Version counter for definitions, incremented on each change.
-    /// Used to invalidate cycle detection cache.
+    /// Used to invalidate cycle detection cache and available fixtures cache.
     pub definitions_version: Arc<std::sync::atomic::AtomicU64>,
     /// Cache of detected fixture cycles.
     /// Stores (definitions_version, cycles) to invalidate when definitions change.
     pub cycle_cache: Arc<DashMap<(), CycleCacheEntry>>,
+    /// Cache of available fixtures per file.
+    /// Stores (definitions_version, fixtures) to invalidate when definitions change.
+    pub available_fixtures_cache: Arc<DashMap<PathBuf, AvailableFixturesCacheEntry>>,
 }
 
 impl Default for FixtureDatabase {
@@ -89,6 +99,7 @@ impl FixtureDatabase {
             definitions: Arc::new(DashMap::new()),
             file_definitions: Arc::new(DashMap::new()),
             usages: Arc::new(DashMap::new()),
+            usage_by_fixture: Arc::new(DashMap::new()),
             file_cache: Arc::new(DashMap::new()),
             undeclared_fixtures: Arc::new(DashMap::new()),
             imports: Arc::new(DashMap::new()),
@@ -97,6 +108,7 @@ impl FixtureDatabase {
             ast_cache: Arc::new(DashMap::new()),
             definitions_version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cycle_cache: Arc::new(DashMap::new()),
+            available_fixtures_cache: Arc::new(DashMap::new()),
         }
     }
 
@@ -202,7 +214,7 @@ impl FixtureDatabase {
     }
 
     /// Remove all cached data for a file.
-    /// Called when a file is closed or deleted to prevent unbounded cache growth.
+    /// Called when a file is closed or deleted to prevent unbounded memory growth.
     pub fn cleanup_file_cache(&self, file_path: &Path) {
         // Use canonical path for consistent cleanup
         let canonical = file_path
@@ -219,6 +231,9 @@ impl FixtureDatabase {
 
         // Remove from file_cache
         self.file_cache.remove(&canonical);
+
+        // Remove from available_fixtures_cache (this file's cached available fixtures)
+        self.available_fixtures_cache.remove(&canonical);
 
         // Note: We don't remove from canonical_path_cache because:
         // 1. It's keyed by original path, not canonical path

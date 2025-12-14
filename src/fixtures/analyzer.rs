@@ -48,6 +48,7 @@ impl FixtureDatabase {
         };
 
         // Clear previous usages for this file
+        self.cleanup_usages_for_file(&file_path);
         self.usages.remove(&file_path);
 
         // Clear previous undeclared fixtures for this file
@@ -134,6 +135,40 @@ impl FixtureDatabase {
         }
     }
 
+    /// Remove usages from the usage_by_fixture reverse index for a specific file.
+    /// Called before re-analyzing a file to clean up stale entries.
+    ///
+    /// Collects all keys first (without filtering) to avoid holding read locks
+    /// while doing the filter check, which could cause deadlocks.
+    fn cleanup_usages_for_file(&self, file_path: &PathBuf) {
+        // Collect all keys first to avoid holding any locks during iteration
+        let all_keys: Vec<String> = self
+            .usage_by_fixture
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        // Process each key - check if it has usages from this file and clean up
+        for fixture_name in all_keys {
+            let should_remove = {
+                if let Some(mut usages) = self.usage_by_fixture.get_mut(&fixture_name) {
+                    let had_usages = usages.iter().any(|(path, _)| path == file_path);
+                    if had_usages {
+                        usages.retain(|(path, _)| path != file_path);
+                    }
+                    usages.is_empty()
+                } else {
+                    false
+                }
+            };
+
+            if should_remove {
+                self.usage_by_fixture
+                    .remove_if(&fixture_name, |_, usages| usages.is_empty());
+            }
+        }
+    }
+
     /// Build an index of line start offsets for O(1) line number lookups.
     /// Uses memchr for SIMD-accelerated newline searching.
     pub(crate) fn build_line_index(content: &str) -> Vec<usize> {
@@ -177,6 +212,7 @@ impl FixtureDatabase {
 
     /// Helper to record a fixture usage in the database.
     /// Reduces code duplication across multiple call sites.
+    /// Also maintains usage_by_fixture reverse index for efficient reference lookups.
     fn record_fixture_usage(
         &self,
         file_path: &Path,
@@ -187,13 +223,24 @@ impl FixtureDatabase {
     ) {
         let file_path_buf = file_path.to_path_buf();
         let usage = FixtureUsage {
-            name: fixture_name,
+            name: fixture_name.clone(),
             file_path: file_path_buf.clone(),
             line,
             start_char,
             end_char,
         };
-        self.usages.entry(file_path_buf).or_default().push(usage);
+
+        // Add to per-file usages map
+        self.usages
+            .entry(file_path_buf.clone())
+            .or_default()
+            .push(usage.clone());
+
+        // Add to reverse index for efficient reference lookups
+        self.usage_by_fixture
+            .entry(fixture_name)
+            .or_default()
+            .push((file_path_buf, usage));
     }
 
     /// Helper to record a fixture definition in the database.

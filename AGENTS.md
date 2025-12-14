@@ -306,14 +306,14 @@ RUST_LOG=debug cargo test          # Run with debug logging
 
 ### Test Coverage
 
-- **386 total tests passing** (as of latest)
+- **425 total tests passing** (as of latest)
   - 243 integration tests in `tests/test_fixtures.rs` (FixtureDatabase API)
-  - 63 integration tests in `tests/test_lsp.rs` (LSP protocol handlers)
+  - 77 integration tests in `tests/test_lsp.rs` (LSP protocol handlers)
   - 37 integration tests in `tests/test_e2e.rs` (End-to-end CLI and workspace tests)
   - 13 integration tests in `tests/test_config.rs` (Configuration file support)
   - 11 unit tests in `tests/test_decorators.rs` (Decorator utilities)
-  - 9 tests in `tests/test_lsp_performance.rs` (Performance and caching)
-  - 10 embedded unit tests in `src/config/` and `src/fixtures/` modules
+  - 13 tests in `tests/test_lsp_performance.rs` (Performance and caching)
+  - 31 embedded unit tests in `src/config/` and `src/fixtures/` modules
 
 **Key test areas:**
 
@@ -756,7 +756,13 @@ The project includes extensions for three major editors/IDEs:
   - Added `disabled_diagnostics` config option to suppress specific diagnostic codes
   - Added `exclude` config option for glob patterns to exclude from scanning
   - Added `scan_workspace_with_excludes()` method in scanner.rs
-  - Test suite: 386 tests (13 new config tests)
+  - Added `find_fixture_or_definition_at_position()` for Call Hierarchy/Implementation on definitions
+  - Added `usage_by_fixture` reverse index for O(1) reference lookups
+  - Added `available_fixtures_cache` with version-based invalidation
+  - Fixed `find_containing_function` to use cached AST instead of re-parsing
+  - Clean `uri_cache` on `did_close` to prevent memory leaks
+  - Added crate-level documentation to `src/lib.rs`
+  - Test suite: 425 tests (14 new Call Hierarchy/Implementation tests, 4 new performance tests)
 - **v0.14.0** (December 2025)
   - Added `fixtures unused` CLI command with CI-friendly exit codes
   - Added circular dependency detection with cached iterative DFS

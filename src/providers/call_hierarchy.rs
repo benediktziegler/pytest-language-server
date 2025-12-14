@@ -26,8 +26,8 @@ impl Backend {
         );
 
         if let Some(file_path) = self.uri_to_path(&uri) {
-            // Find the fixture at the cursor position
-            if let Some(definition) = self.fixture_db.find_fixture_definition(
+            // Find the fixture at the cursor position (works on both definitions and usages)
+            if let Some(definition) = self.fixture_db.find_fixture_or_definition_at_position(
                 &file_path,
                 position.line,
                 position.character,
