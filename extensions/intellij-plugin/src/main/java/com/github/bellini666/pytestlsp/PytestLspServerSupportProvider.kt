@@ -72,7 +72,7 @@ class PytestLspServerSupportProviderFallback : LspServerSupportProvider {
         private val LOG = Logger.getInstance(PytestLspServerSupportProviderFallback::class.java)
 
         /**
-         * Check if com.intellij.modules.lsp is available.
+         * Check if com.intellij.modules.lsp is available and enabled.
          * This module is present in:
          * - Unified PyCharm 2025.1+ (free tier)
          * - All commercial IDEs 2025.2+
@@ -80,7 +80,9 @@ class PytestLspServerSupportProviderFallback : LspServerSupportProvider {
         private fun isLspModuleAvailable(): Boolean {
             return try {
                 val lspModuleId = PluginId.getId("com.intellij.modules.lsp")
-                val isAvailable = PluginManagerCore.getPlugin(lspModuleId)?.isEnabled == true
+                // Use non-deprecated API: check if plugin exists and is not disabled
+                val plugin = PluginManagerCore.getPlugin(lspModuleId)
+                val isAvailable = plugin != null && !PluginManagerCore.isDisabled(lspModuleId)
                 if (isAvailable) {
                     LOG.info("com.intellij.modules.lsp is available, fallback provider will not be registered")
                 }
