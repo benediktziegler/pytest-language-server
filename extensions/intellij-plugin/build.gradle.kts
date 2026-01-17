@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "com.github.bellini666"
-version = "0.17.3"
+version = "0.18.0"
 
 repositories {
     mavenCentral()
