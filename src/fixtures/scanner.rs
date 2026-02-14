@@ -3,10 +3,19 @@
 use super::FixtureDatabase;
 use glob::Pattern;
 use rayon::prelude::*;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tracing::{debug, error, info, warn};
 use walkdir::WalkDir;
+
+/// A pytest11 entry point from a dist-info package.
+#[derive(Debug, Clone)]
+pub(crate) struct Pytest11EntryPoint {
+    /// The plugin name (left side of =)
+    pub(crate) name: String,
+    /// The Python module path (right side of =)
+    pub(crate) module_path: String,
+}
 
 impl FixtureDatabase {
     /// Directories that should be skipped during workspace scanning.
@@ -415,122 +424,173 @@ impl FixtureDatabase {
         warn!("Could not find site-packages in venv: {:?}", venv_path);
     }
 
-    fn scan_pytest_plugins(&self, site_packages: &Path) {
-        info!("Scanning pytest plugins in: {:?}", site_packages);
+    /// Parse entry_points.txt content and extract pytest11 entries.
+    /// Returns empty vec if no pytest11 section or file is malformed.
+    fn parse_pytest11_entry_points(content: &str) -> Vec<Pytest11EntryPoint> {
+        let mut results = Vec::new();
+        let mut in_pytest11_section = false;
 
-        // List of known pytest plugin prefixes/packages
-        let pytest_packages = vec![
-            // Existing plugins
-            "pytest_mock",
-            "pytest-mock",
-            "pytest_asyncio",
-            "pytest-asyncio",
-            "pytest_django",
-            "pytest-django",
-            "pytest_cov",
-            "pytest-cov",
-            "pytest_xdist",
-            "pytest-xdist",
-            "pytest_fixtures",
-            // Additional popular plugins
-            "pytest_flask",
-            "pytest-flask",
-            "pytest_httpx",
-            "pytest-httpx",
-            "pytest_postgresql",
-            "pytest-postgresql",
-            "pytest_mongodb",
-            "pytest-mongodb",
-            "pytest_redis",
-            "pytest-redis",
-            "pytest_elasticsearch",
-            "pytest-elasticsearch",
-            "pytest_rabbitmq",
-            "pytest-rabbitmq",
-            "pytest_mysql",
-            "pytest-mysql",
-            "pytest_docker",
-            "pytest-docker",
-            "pytest_kubernetes",
-            "pytest-kubernetes",
-            "pytest_celery",
-            "pytest-celery",
-            "pytest_tornado",
-            "pytest-tornado",
-            "pytest_aiohttp",
-            "pytest-aiohttp",
-            "pytest_sanic",
-            "pytest-sanic",
-            "pytest_fastapi",
-            "pytest-fastapi",
-            "pytest_alembic",
-            "pytest-alembic",
-            "pytest_sqlalchemy",
-            "pytest-sqlalchemy",
-            "pytest_factoryboy",
-            "pytest-factoryboy",
-            "pytest_freezegun",
-            "pytest-freezegun",
-            "pytest_mimesis",
-            "pytest-mimesis",
-            "pytest_lazy_fixture",
-            "pytest-lazy-fixture",
-            "pytest_cases",
-            "pytest-cases",
-            "pytest_bdd",
-            "pytest-bdd",
-            "pytest_benchmark",
-            "pytest-benchmark",
-            "pytest_timeout",
-            "pytest-timeout",
-            "pytest_retry",
-            "pytest-retry",
-            "pytest_repeat",
-            "pytest-repeat",
-            "pytest_rerunfailures",
-            "pytest-rerunfailures",
-            "pytest_ordering",
-            "pytest-ordering",
-            "pytest_dependency",
-            "pytest-dependency",
-            "pytest_random_order",
-            "pytest-random-order",
-            "pytest_picked",
-            "pytest-picked",
-            "pytest_testmon",
-            "pytest-testmon",
-            "pytest_split",
-            "pytest-split",
-            "pytest_env",
-            "pytest-env",
-            "pytest_dotenv",
-            "pytest-dotenv",
-            "pytest_html",
-            "pytest-html",
-            "pytest_json_report",
-            "pytest-json-report",
-            "pytest_metadata",
-            "pytest-metadata",
-            "pytest_instafail",
-            "pytest-instafail",
-            "pytest_clarity",
-            "pytest-clarity",
-            "pytest_sugar",
-            "pytest-sugar",
-            "pytest_emoji",
-            "pytest-emoji",
-            "pytest_play",
-            "pytest-play",
-            "pytest_selenium",
-            "pytest-selenium",
-            "pytest_playwright",
-            "pytest-playwright",
-            "pytest_splinter",
-            "pytest-splinter",
-        ];
+        for line in content.lines() {
+            let line = line.trim();
+
+            // Check for section headers
+            if line.starts_with('[') && line.ends_with(']') {
+                in_pytest11_section = line == "[pytest11]";
+                continue;
+            }
+
+            // Parse entries within pytest11 section
+            if in_pytest11_section && !line.is_empty() && !line.starts_with('#') {
+                if let Some((name, module_path)) = line.split_once('=') {
+                    results.push(Pytest11EntryPoint {
+                        name: name.trim().to_string(),
+                        module_path: module_path.trim().to_string(),
+                    });
+                }
+            }
+        }
+        results
+    }
+
+    /// Resolve a Python module path to a file system path within site-packages.
+    ///
+    /// Examples:
+    /// - "pytest_mock" → site_packages/pytest_mock/__init__.py or site_packages/pytest_mock.py
+    /// - "pytest_asyncio.plugin" → site_packages/pytest_asyncio/plugin.py
+    ///
+    /// Returns the path to the specific module file (not directory).
+    fn resolve_entry_point_module_to_path(
+        site_packages: &Path,
+        module_path: &str,
+    ) -> Option<PathBuf> {
+        // Strip any :attr suffix (e.g., "module:function" -> "module")
+        let module_path = module_path.split(':').next().unwrap_or(module_path);
+
+        // Split into components
+        let parts: Vec<&str> = module_path.split('.').collect();
+
+        if parts.is_empty() {
+            return None;
+        }
+
+        // Build the path from module components
+        let mut path = site_packages.to_path_buf();
+        for part in &parts {
+            path.push(part);
+        }
+
+        // Check if it's a module file (add .py extension)
+        let py_file = path.with_extension("py");
+        if py_file.exists() {
+            return Some(py_file);
+        }
+
+        // Check if it's a package directory (has __init__.py)
+        if path.is_dir() {
+            let init_file = path.join("__init__.py");
+            if init_file.exists() {
+                return Some(init_file);
+            }
+        }
+
+        // Try as a single-file module at top level (for single-part module paths)
+        if parts.len() == 1 {
+            let single_file = site_packages.join(format!("{}.py", parts[0]));
+            if single_file.exists() {
+                return Some(single_file);
+            }
+        }
+
+        None
+    }
+
+    /// Scan a single Python file for fixture definitions.
+    fn scan_single_plugin_file(&self, file_path: &Path) {
+        if file_path.extension().and_then(|s| s.to_str()) != Some("py") {
+            return;
+        }
+
+        debug!("Scanning plugin file: {:?}", file_path);
+
+        if let Ok(content) = std::fs::read_to_string(file_path) {
+            self.analyze_file(file_path.to_path_buf(), &content);
+        }
+    }
+
+    /// Load pytest plugins from a single dist-info directory's entry points.
+    ///
+    /// Reads entry_points.txt, parses [pytest11] section, resolves modules,
+    /// and scans discovered plugin files for fixtures.
+    ///
+    /// Returns the number of plugin modules scanned.
+    fn load_plugin_from_entry_point(&self, dist_info_path: &Path, site_packages: &Path) -> usize {
+        let entry_points_file = dist_info_path.join("entry_points.txt");
+
+        let content = match std::fs::read_to_string(&entry_points_file) {
+            Ok(c) => c,
+            Err(_) => return 0, // No entry_points.txt or unreadable
+        };
+
+        let entries = Self::parse_pytest11_entry_points(&content);
+
+        if entries.is_empty() {
+            return 0; // No pytest11 plugins in this package
+        }
+
+        let mut scanned_count = 0;
+
+        for entry in entries {
+            debug!(
+                "Found pytest11 entry: {} = {}",
+                entry.name, entry.module_path
+            );
+
+            if let Some(path) =
+                Self::resolve_entry_point_module_to_path(site_packages, &entry.module_path)
+            {
+                info!("Scanning pytest plugin: {} -> {:?}", entry.name, path);
+                self.scan_single_plugin_file(&path);
+                scanned_count += 1;
+            } else {
+                debug!(
+                    "Could not resolve module path: {} for plugin {}",
+                    entry.module_path, entry.name
+                );
+            }
+        }
+
+        scanned_count
+    }
+
+    /// Scan pytest's internal _pytest package for built-in fixtures.
+    /// This handles fixtures like tmp_path, capsys, monkeypatch, etc.
+    fn scan_pytest_internal_fixtures(&self, site_packages: &Path) {
+        let pytest_internal = site_packages.join("_pytest");
+
+        if !pytest_internal.exists() || !pytest_internal.is_dir() {
+            debug!("_pytest directory not found in site-packages");
+            return;
+        }
+
+        info!(
+            "Scanning pytest internal fixtures in: {:?}",
+            pytest_internal
+        );
+        self.scan_plugin_directory(&pytest_internal);
+    }
+
+    fn scan_pytest_plugins(&self, site_packages: &Path) {
+        info!(
+            "Scanning for pytest plugins via entry points in: {:?}",
+            site_packages
+        );
 
         let mut plugin_count = 0;
 
+        // First, scan pytest's internal fixtures (special case)
+        self.scan_pytest_internal_fixtures(site_packages);
+
+        // Iterate over ALL dist-info directories and check for pytest11 entry points
         for entry in std::fs::read_dir(site_packages).into_iter().flatten() {
             let entry = match entry {
                 Ok(e) => e,
@@ -540,30 +600,23 @@ impl FixtureDatabase {
             let path = entry.path();
             let filename = path.file_name().unwrap_or_default().to_string_lossy();
 
-            // Check if this is a pytest-related package
-            let is_pytest_package = pytest_packages.iter().any(|pkg| filename.contains(pkg))
-                || filename.starts_with("pytest")
-                || filename.contains("_pytest");
+            // Only process .dist-info directories
+            if !filename.ends_with(".dist-info") {
+                continue;
+            }
 
-            if is_pytest_package && path.is_dir() {
-                // Skip .dist-info directories - they don't contain code
-                if filename.ends_with(".dist-info") || filename.ends_with(".egg-info") {
-                    debug!("Skipping dist-info directory: {:?}", filename);
-                    continue;
-                }
-
-                info!("Scanning pytest plugin: {:?}", path);
-                plugin_count += 1;
-                self.scan_plugin_directory(&path);
-            } else {
-                // Log packages we're skipping for debugging
-                if filename.contains("mock") {
-                    debug!("Found mock-related package (not scanning): {:?}", filename);
-                }
+            // Try to load plugins from this package's entry points
+            let scanned = self.load_plugin_from_entry_point(&path, site_packages);
+            if scanned > 0 {
+                plugin_count += scanned;
+                debug!("Loaded {} plugin module(s) from {}", scanned, filename);
             }
         }
 
-        info!("Scanned {} pytest plugin packages", plugin_count);
+        info!(
+            "Discovered fixtures from {} pytest plugin modules",
+            plugin_count
+        );
     }
 
     fn scan_plugin_directory(&self, plugin_dir: &Path) {
@@ -590,5 +643,507 @@ impl FixtureDatabase {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_parse_pytest11_entry_points_basic() {
+        let content = r#"
+[console_scripts]
+my-cli = my_package:main
+
+[pytest11]
+my_plugin = my_package.plugin
+another = another_pkg
+
+[other_section]
+foo = bar
+"#;
+
+        let entries = FixtureDatabase::parse_pytest11_entry_points(content);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "my_plugin");
+        assert_eq!(entries[0].module_path, "my_package.plugin");
+        assert_eq!(entries[1].name, "another");
+        assert_eq!(entries[1].module_path, "another_pkg");
+    }
+
+    #[test]
+    fn test_parse_pytest11_entry_points_empty_file() {
+        let entries = FixtureDatabase::parse_pytest11_entry_points("");
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_parse_pytest11_entry_points_no_pytest11_section() {
+        let content = r#"
+[console_scripts]
+my-cli = my_package:main
+"#;
+        let entries = FixtureDatabase::parse_pytest11_entry_points(content);
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_parse_pytest11_entry_points_with_comments() {
+        let content = r#"
+[pytest11]
+# This is a comment
+my_plugin = my_package.plugin
+# Another comment
+"#;
+        let entries = FixtureDatabase::parse_pytest11_entry_points(content);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "my_plugin");
+    }
+
+    #[test]
+    fn test_parse_pytest11_entry_points_with_whitespace() {
+        let content = r#"
+[pytest11]
+   my_plugin   =   my_package.plugin
+another=another_pkg
+"#;
+        let entries = FixtureDatabase::parse_pytest11_entry_points(content);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "my_plugin");
+        assert_eq!(entries[0].module_path, "my_package.plugin");
+        assert_eq!(entries[1].name, "another");
+        assert_eq!(entries[1].module_path, "another_pkg");
+    }
+
+    #[test]
+    fn test_parse_pytest11_entry_points_with_attr() {
+        // Some entry points have :attr suffix (e.g., module:function)
+        let content = r#"
+[pytest11]
+my_plugin = my_package.module:plugin_entry
+"#;
+        let entries = FixtureDatabase::parse_pytest11_entry_points(content);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].module_path, "my_package.module:plugin_entry");
+    }
+
+    #[test]
+    fn test_parse_pytest11_entry_points_multiple_sections_before_pytest11() {
+        let content = r#"
+[console_scripts]
+cli = pkg:main
+
+[gui_scripts]
+gui = pkg:gui_main
+
+[pytest11]
+my_plugin = my_package.plugin
+
+[other]
+extra = something
+"#;
+        let entries = FixtureDatabase::parse_pytest11_entry_points(content);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "my_plugin");
+    }
+
+    #[test]
+    fn test_resolve_entry_point_module_to_path_package() {
+        let temp = tempdir().unwrap();
+        let site_packages = temp.path();
+
+        // Create a package with __init__.py
+        let pkg_dir = site_packages.join("my_plugin");
+        fs::create_dir_all(&pkg_dir).unwrap();
+        fs::write(pkg_dir.join("__init__.py"), "# plugin code").unwrap();
+
+        // Should resolve to __init__.py
+        let result =
+            FixtureDatabase::resolve_entry_point_module_to_path(site_packages, "my_plugin");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), pkg_dir.join("__init__.py"));
+    }
+
+    #[test]
+    fn test_resolve_entry_point_module_to_path_submodule() {
+        let temp = tempdir().unwrap();
+        let site_packages = temp.path();
+
+        // Create a package with a submodule
+        let pkg_dir = site_packages.join("my_plugin");
+        fs::create_dir_all(&pkg_dir).unwrap();
+        fs::write(pkg_dir.join("__init__.py"), "").unwrap();
+        fs::write(pkg_dir.join("plugin.py"), "# plugin code").unwrap();
+
+        // Should resolve to plugin.py
+        let result =
+            FixtureDatabase::resolve_entry_point_module_to_path(site_packages, "my_plugin.plugin");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), pkg_dir.join("plugin.py"));
+    }
+
+    #[test]
+    fn test_resolve_entry_point_module_to_path_single_file() {
+        let temp = tempdir().unwrap();
+        let site_packages = temp.path();
+
+        // Create a single-file module
+        fs::write(site_packages.join("my_plugin.py"), "# plugin code").unwrap();
+
+        // Should resolve to my_plugin.py
+        let result =
+            FixtureDatabase::resolve_entry_point_module_to_path(site_packages, "my_plugin");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), site_packages.join("my_plugin.py"));
+    }
+
+    #[test]
+    fn test_resolve_entry_point_module_to_path_not_found() {
+        let temp = tempdir().unwrap();
+        let site_packages = temp.path();
+
+        // Nothing exists
+        let result = FixtureDatabase::resolve_entry_point_module_to_path(
+            site_packages,
+            "nonexistent_plugin",
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_resolve_entry_point_module_strips_attr() {
+        let temp = tempdir().unwrap();
+        let site_packages = temp.path();
+
+        // Create a package with a submodule
+        let pkg_dir = site_packages.join("my_plugin");
+        fs::create_dir_all(&pkg_dir).unwrap();
+        fs::write(pkg_dir.join("__init__.py"), "").unwrap();
+        fs::write(pkg_dir.join("module.py"), "# plugin code").unwrap();
+
+        // Should resolve even with :attr suffix
+        let result = FixtureDatabase::resolve_entry_point_module_to_path(
+            site_packages,
+            "my_plugin.module:entry_function",
+        );
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), pkg_dir.join("module.py"));
+    }
+
+    #[test]
+    fn test_entry_point_plugin_discovery_integration() {
+        // Create mock site-packages structure
+        let temp = tempdir().unwrap();
+        let site_packages = temp.path();
+
+        // Create a mock plugin package
+        let plugin_dir = site_packages.join("my_pytest_plugin");
+        fs::create_dir_all(&plugin_dir).unwrap();
+
+        let plugin_content = r#"
+import pytest
+
+@pytest.fixture
+def my_dynamic_fixture():
+    """A fixture discovered via entry points."""
+    return "discovered via entry point"
+
+@pytest.fixture
+def another_dynamic_fixture():
+    return 42
+"#;
+        fs::write(plugin_dir.join("__init__.py"), plugin_content).unwrap();
+
+        // Create dist-info with entry points
+        let dist_info = site_packages.join("my_pytest_plugin-1.0.0.dist-info");
+        fs::create_dir_all(&dist_info).unwrap();
+
+        let entry_points = "[pytest11]\nmy_plugin = my_pytest_plugin\n";
+        fs::write(dist_info.join("entry_points.txt"), entry_points).unwrap();
+
+        // Scan and verify
+        let db = FixtureDatabase::new();
+        db.scan_pytest_plugins(site_packages);
+
+        assert!(
+            db.definitions.contains_key("my_dynamic_fixture"),
+            "my_dynamic_fixture should be discovered"
+        );
+        assert!(
+            db.definitions.contains_key("another_dynamic_fixture"),
+            "another_dynamic_fixture should be discovered"
+        );
+    }
+
+    #[test]
+    fn test_entry_point_discovery_submodule() {
+        let temp = tempdir().unwrap();
+        let site_packages = temp.path();
+
+        // Create package with plugin in submodule (like pytest_asyncio.plugin)
+        let plugin_dir = site_packages.join("my_pytest_plugin");
+        fs::create_dir_all(&plugin_dir).unwrap();
+        fs::write(plugin_dir.join("__init__.py"), "# main init").unwrap();
+
+        let plugin_content = r#"
+import pytest
+
+@pytest.fixture
+def submodule_fixture():
+    return "from submodule"
+"#;
+        fs::write(plugin_dir.join("plugin.py"), plugin_content).unwrap();
+
+        // Create dist-info with entry points pointing to submodule
+        let dist_info = site_packages.join("my_pytest_plugin-1.0.0.dist-info");
+        fs::create_dir_all(&dist_info).unwrap();
+
+        let entry_points = "[pytest11]\nmy_plugin = my_pytest_plugin.plugin\n";
+        fs::write(dist_info.join("entry_points.txt"), entry_points).unwrap();
+
+        // Scan and verify
+        let db = FixtureDatabase::new();
+        db.scan_pytest_plugins(site_packages);
+
+        assert!(
+            db.definitions.contains_key("submodule_fixture"),
+            "submodule_fixture should be discovered"
+        );
+    }
+
+    #[test]
+    fn test_entry_point_discovery_no_pytest11_section() {
+        let temp = tempdir().unwrap();
+        let site_packages = temp.path();
+
+        // Create a package that's NOT a pytest plugin
+        let pkg_dir = site_packages.join("some_package");
+        fs::create_dir_all(&pkg_dir).unwrap();
+
+        let pkg_content = r#"
+import pytest
+
+@pytest.fixture
+def should_not_be_found():
+    return "this package is not a pytest plugin"
+"#;
+        fs::write(pkg_dir.join("__init__.py"), pkg_content).unwrap();
+
+        // Create dist-info WITHOUT pytest11 section
+        let dist_info = site_packages.join("some_package-1.0.0.dist-info");
+        fs::create_dir_all(&dist_info).unwrap();
+
+        let entry_points = "[console_scripts]\nsome_cli = some_package:main\n";
+        fs::write(dist_info.join("entry_points.txt"), entry_points).unwrap();
+
+        // Scan and verify
+        let db = FixtureDatabase::new();
+        db.scan_pytest_plugins(site_packages);
+
+        assert!(
+            !db.definitions.contains_key("should_not_be_found"),
+            "should_not_be_found should NOT be discovered (not a pytest plugin)"
+        );
+    }
+
+    #[test]
+    fn test_entry_point_discovery_missing_entry_points_txt() {
+        let temp = tempdir().unwrap();
+        let site_packages = temp.path();
+
+        // Create a package
+        let pkg_dir = site_packages.join("some_package");
+        fs::create_dir_all(&pkg_dir).unwrap();
+
+        let pkg_content = r#"
+import pytest
+
+@pytest.fixture
+def should_not_be_found():
+    return "no entry_points.txt"
+"#;
+        fs::write(pkg_dir.join("__init__.py"), pkg_content).unwrap();
+
+        // Create dist-info WITHOUT entry_points.txt file
+        let dist_info = site_packages.join("some_package-1.0.0.dist-info");
+        fs::create_dir_all(&dist_info).unwrap();
+        // Don't create entry_points.txt
+
+        // Scan and verify
+        let db = FixtureDatabase::new();
+        db.scan_pytest_plugins(site_packages);
+
+        assert!(
+            !db.definitions.contains_key("should_not_be_found"),
+            "should_not_be_found should NOT be discovered (no entry_points.txt)"
+        );
+    }
+
+    #[test]
+    fn test_entry_point_discovery_multiple_plugins() {
+        let temp = tempdir().unwrap();
+        let site_packages = temp.path();
+
+        // Create first plugin
+        let plugin1_dir = site_packages.join("plugin_one");
+        fs::create_dir_all(&plugin1_dir).unwrap();
+        fs::write(
+            plugin1_dir.join("__init__.py"),
+            r#"
+import pytest
+
+@pytest.fixture
+def fixture_from_plugin_one():
+    return 1
+"#,
+        )
+        .unwrap();
+
+        let dist_info1 = site_packages.join("plugin_one-1.0.0.dist-info");
+        fs::create_dir_all(&dist_info1).unwrap();
+        fs::write(
+            dist_info1.join("entry_points.txt"),
+            "[pytest11]\nplugin_one = plugin_one\n",
+        )
+        .unwrap();
+
+        // Create second plugin
+        let plugin2_dir = site_packages.join("plugin_two");
+        fs::create_dir_all(&plugin2_dir).unwrap();
+        fs::write(
+            plugin2_dir.join("__init__.py"),
+            r#"
+import pytest
+
+@pytest.fixture
+def fixture_from_plugin_two():
+    return 2
+"#,
+        )
+        .unwrap();
+
+        let dist_info2 = site_packages.join("plugin_two-2.0.0.dist-info");
+        fs::create_dir_all(&dist_info2).unwrap();
+        fs::write(
+            dist_info2.join("entry_points.txt"),
+            "[pytest11]\nplugin_two = plugin_two\n",
+        )
+        .unwrap();
+
+        // Scan and verify both are discovered
+        let db = FixtureDatabase::new();
+        db.scan_pytest_plugins(site_packages);
+
+        assert!(
+            db.definitions.contains_key("fixture_from_plugin_one"),
+            "fixture_from_plugin_one should be discovered"
+        );
+        assert!(
+            db.definitions.contains_key("fixture_from_plugin_two"),
+            "fixture_from_plugin_two should be discovered"
+        );
+    }
+
+    #[test]
+    fn test_entry_point_discovery_multiple_entries_in_one_package() {
+        let temp = tempdir().unwrap();
+        let site_packages = temp.path();
+
+        // Create a package with multiple plugin modules
+        let plugin_dir = site_packages.join("multi_plugin");
+        fs::create_dir_all(&plugin_dir).unwrap();
+        fs::write(plugin_dir.join("__init__.py"), "").unwrap();
+
+        fs::write(
+            plugin_dir.join("fixtures_a.py"),
+            r#"
+import pytest
+
+@pytest.fixture
+def fixture_a():
+    return "A"
+"#,
+        )
+        .unwrap();
+
+        fs::write(
+            plugin_dir.join("fixtures_b.py"),
+            r#"
+import pytest
+
+@pytest.fixture
+def fixture_b():
+    return "B"
+"#,
+        )
+        .unwrap();
+
+        // Create dist-info with multiple pytest11 entries
+        let dist_info = site_packages.join("multi_plugin-1.0.0.dist-info");
+        fs::create_dir_all(&dist_info).unwrap();
+        fs::write(
+            dist_info.join("entry_points.txt"),
+            r#"[pytest11]
+fixtures_a = multi_plugin.fixtures_a
+fixtures_b = multi_plugin.fixtures_b
+"#,
+        )
+        .unwrap();
+
+        // Scan and verify both modules are scanned
+        let db = FixtureDatabase::new();
+        db.scan_pytest_plugins(site_packages);
+
+        assert!(
+            db.definitions.contains_key("fixture_a"),
+            "fixture_a should be discovered"
+        );
+        assert!(
+            db.definitions.contains_key("fixture_b"),
+            "fixture_b should be discovered"
+        );
+    }
+
+    #[test]
+    fn test_pytest_internal_fixtures_scanned() {
+        let temp = tempdir().unwrap();
+        let site_packages = temp.path();
+
+        // Create mock _pytest directory (pytest's internal package)
+        let pytest_internal = site_packages.join("_pytest");
+        fs::create_dir_all(&pytest_internal).unwrap();
+
+        let internal_fixtures = r#"
+import pytest
+
+@pytest.fixture
+def tmp_path():
+    """Pytest's built-in tmp_path fixture."""
+    pass
+
+@pytest.fixture
+def capsys():
+    """Pytest's built-in capsys fixture."""
+    pass
+"#;
+        fs::write(pytest_internal.join("fixtures.py"), internal_fixtures).unwrap();
+
+        // Scan and verify internal fixtures are discovered
+        let db = FixtureDatabase::new();
+        db.scan_pytest_plugins(site_packages);
+
+        // Note: We're checking that _pytest is scanned as a special case
+        // even without entry points
+        assert!(
+            db.definitions.contains_key("tmp_path"),
+            "tmp_path should be discovered from _pytest"
+        );
+        assert!(
+            db.definitions.contains_key("capsys"),
+            "capsys should be discovered from _pytest"
+        );
     }
 }
