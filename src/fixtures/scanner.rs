@@ -424,8 +424,11 @@ impl FixtureDatabase {
         warn!("Could not find site-packages in venv: {:?}", venv_path);
     }
 
-    /// Parse entry_points.txt content and extract pytest11 entries.
-    /// Returns empty vec if no pytest11 section or file is malformed.
+    /// Parse `entry_points.txt` content and extract pytest11 entries.
+    ///
+    /// Returns all successfully parsed entries from the `[pytest11]` section.
+    /// Returns an empty vec if there is no `[pytest11]` section or no valid
+    /// `name = value` lines within that section. Malformed lines are ignored.
     fn parse_pytest11_entry_points(content: &str) -> Vec<Pytest11EntryPoint> {
         let mut results = Vec::new();
         let mut in_pytest11_section = false;
@@ -458,7 +461,7 @@ impl FixtureDatabase {
     /// - "pytest_mock" → site_packages/pytest_mock/__init__.py or site_packages/pytest_mock.py
     /// - "pytest_asyncio.plugin" → site_packages/pytest_asyncio/plugin.py
     ///
-    /// Returns the path to the specific module file (not directory).
+    /// Returns the path to a `.py` file (may be `__init__.py` for packages).
     fn resolve_entry_point_module_to_path(
         site_packages: &Path,
         module_path: &str,
@@ -490,14 +493,6 @@ impl FixtureDatabase {
             let init_file = path.join("__init__.py");
             if init_file.exists() {
                 return Some(init_file);
-            }
-        }
-
-        // Try as a single-file module at top level (for single-part module paths)
-        if parts.len() == 1 {
-            let single_file = site_packages.join(format!("{}.py", parts[0]));
-            if single_file.exists() {
-                return Some(single_file);
             }
         }
 
@@ -548,9 +543,29 @@ impl FixtureDatabase {
             if let Some(path) =
                 Self::resolve_entry_point_module_to_path(site_packages, &entry.module_path)
             {
-                info!("Scanning pytest plugin: {} -> {:?}", entry.name, path);
-                self.scan_single_plugin_file(&path);
-                scanned_count += 1;
+                let scanned = if path.file_name().and_then(|n| n.to_str()) == Some("__init__.py") {
+                    let package_dir = path.parent().expect("__init__.py must have parent");
+                    info!(
+                        "Scanning pytest plugin package directory for {}: {:?}",
+                        entry.name, package_dir
+                    );
+                    self.scan_plugin_directory(package_dir);
+                    true
+                } else if path.is_file() {
+                    info!("Scanning pytest plugin: {} -> {:?}", entry.name, path);
+                    self.scan_single_plugin_file(&path);
+                    true
+                } else {
+                    debug!(
+                        "Resolved module path for plugin {} is not a file: {:?}",
+                        entry.name, path
+                    );
+                    false
+                };
+
+                if scanned {
+                    scanned_count += 1;
+                }
             } else {
                 debug!(
                     "Could not resolve module path: {} for plugin {}",
@@ -600,8 +615,8 @@ impl FixtureDatabase {
             let path = entry.path();
             let filename = path.file_name().unwrap_or_default().to_string_lossy();
 
-            // Only process .dist-info directories
-            if !filename.ends_with(".dist-info") {
+            // Only process dist metadata directories
+            if !filename.ends_with(".dist-info") && !filename.ends_with(".egg-info") {
                 continue;
             }
 
@@ -915,6 +930,42 @@ def submodule_fixture():
     }
 
     #[test]
+    fn test_entry_point_discovery_package_scans_submodules() {
+        let temp = tempdir().unwrap();
+        let site_packages = temp.path();
+
+        // Create package with fixtures in a submodule
+        let plugin_dir = site_packages.join("my_pytest_plugin");
+        fs::create_dir_all(&plugin_dir).unwrap();
+        fs::write(plugin_dir.join("__init__.py"), "# package init").unwrap();
+
+        let plugin_content = r#"
+import pytest
+
+@pytest.fixture
+def package_submodule_fixture():
+    return "from package submodule"
+"#;
+        fs::write(plugin_dir.join("fixtures.py"), plugin_content).unwrap();
+
+        // Create dist-info with entry points pointing to package
+        let dist_info = site_packages.join("my_pytest_plugin-1.0.0.dist-info");
+        fs::create_dir_all(&dist_info).unwrap();
+
+        let entry_points = "[pytest11]\nmy_plugin = my_pytest_plugin\n";
+        fs::write(dist_info.join("entry_points.txt"), entry_points).unwrap();
+
+        // Scan and verify submodule fixtures are discovered
+        let db = FixtureDatabase::new();
+        db.scan_pytest_plugins(site_packages);
+
+        assert!(
+            db.definitions.contains_key("package_submodule_fixture"),
+            "package_submodule_fixture should be discovered"
+        );
+    }
+
+    #[test]
     fn test_entry_point_discovery_no_pytest11_section() {
         let temp = tempdir().unwrap();
         let site_packages = temp.path();
@@ -979,6 +1030,42 @@ def should_not_be_found():
         assert!(
             !db.definitions.contains_key("should_not_be_found"),
             "should_not_be_found should NOT be discovered (no entry_points.txt)"
+        );
+    }
+
+    #[test]
+    fn test_entry_point_discovery_egg_info() {
+        let temp = tempdir().unwrap();
+        let site_packages = temp.path();
+
+        // Create a package
+        let pkg_dir = site_packages.join("legacy_plugin");
+        fs::create_dir_all(&pkg_dir).unwrap();
+        fs::write(
+            pkg_dir.join("__init__.py"),
+            r#"
+import pytest
+
+@pytest.fixture
+def legacy_plugin_fixture():
+    return "from egg-info"
+"#,
+        )
+        .unwrap();
+
+        // Create egg-info with entry points
+        let egg_info = site_packages.join("legacy_plugin-1.0.0.egg-info");
+        fs::create_dir_all(&egg_info).unwrap();
+        let entry_points = "[pytest11]\nlegacy_plugin = legacy_plugin\n";
+        fs::write(egg_info.join("entry_points.txt"), entry_points).unwrap();
+
+        // Scan and verify
+        let db = FixtureDatabase::new();
+        db.scan_pytest_plugins(site_packages);
+
+        assert!(
+            db.definitions.contains_key("legacy_plugin_fixture"),
+            "legacy_plugin_fixture should be discovered"
         );
     }
 
