@@ -2,7 +2,7 @@
 
 use super::types::FixtureDefinition;
 use super::FixtureDatabase;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 impl FixtureDatabase {
@@ -97,7 +97,70 @@ impl FixtureDatabase {
             }
         }
 
-        let definition_usage_counts = self.compute_definition_usage_counts();
+        let mut definition_usage_counts = self.compute_definition_usage_counts();
+
+        // Remap editable install paths to virtual site-packages paths for display.
+        // Only remap files that are outside the workspace (third-party editable installs).
+        let mut editable_dirs: HashSet<PathBuf> = HashSet::new();
+        {
+            let installs = self.editable_install_roots.lock().unwrap();
+            let workspace = self.workspace_root.lock().unwrap();
+            let mut remapped: Vec<(PathBuf, PathBuf)> = Vec::new();
+
+            for install in installs.iter() {
+                // Skip editable installs that overlap with the workspace:
+                // - source_root is inside workspace (in-workspace editable)
+                // - workspace is inside source_root (project installed editable in its own venv)
+                if let Some(ref ws) = *workspace {
+                    if install.source_root.starts_with(ws) || ws.starts_with(&install.source_root) {
+                        continue;
+                    }
+                }
+
+                let keys_to_remap: Vec<PathBuf> = file_fixtures
+                    .keys()
+                    .filter(|p| p.starts_with(&install.source_root))
+                    .cloned()
+                    .collect();
+
+                for original_path in keys_to_remap {
+                    if let Ok(relative) = original_path.strip_prefix(&install.source_root) {
+                        let virtual_path = install.site_packages.join(relative);
+                        // Build label path from raw package name (dot-separated for namespace packages)
+                        let parts: Vec<&str> = install.raw_package_name.split('.').collect();
+                        if !parts.is_empty() {
+                            let mut label_path = install.site_packages.clone();
+                            for part in &parts {
+                                label_path = label_path.join(part.replace('-', "_"));
+                            }
+                            editable_dirs.insert(label_path);
+                        }
+                        remapped.push((original_path, virtual_path));
+                    }
+                }
+            }
+
+            for (original, virtual_path) in &remapped {
+                if let Some(fixtures) = file_fixtures.remove(original) {
+                    file_fixtures.insert(virtual_path.clone(), fixtures);
+                }
+            }
+
+            // Remap usage count keys to match virtual paths
+            let mut remapped_counts: Vec<((PathBuf, String), (PathBuf, String))> = Vec::new();
+            for (original, virtual_path) in &remapped {
+                for key in definition_usage_counts.keys() {
+                    if key.0 == *original {
+                        remapped_counts.push((key.clone(), (virtual_path.clone(), key.1.clone())));
+                    }
+                }
+            }
+            for (old_key, new_key) in remapped_counts {
+                if let Some(count) = definition_usage_counts.remove(&old_key) {
+                    definition_usage_counts.insert(new_key, count);
+                }
+            }
+        }
 
         // Build a tree structure from paths
         let mut tree: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
@@ -163,6 +226,7 @@ impl FixtureDatabase {
                 &definition_usage_counts,
                 skip_unused,
                 only_unused,
+                &editable_dirs,
             );
         }
     }
@@ -179,6 +243,7 @@ impl FixtureDatabase {
         definition_usage_counts: &HashMap<(PathBuf, String), usize>,
         skip_unused: bool,
         only_unused: bool,
+        editable_dirs: &HashSet<PathBuf>,
     ) {
         use colored::Colorize;
 
@@ -281,7 +346,12 @@ impl FixtureDatabase {
                 return;
             }
 
-            let dir_display = format!("{}/", name).blue().bold();
+            let dir_label = if editable_dirs.contains(path) {
+                format!("{}/ (editable install)", name)
+            } else {
+                format!("{}/", name)
+            };
+            let dir_display = dir_label.blue().bold();
             println!("{}{}{}", prefix, connector, dir_display);
 
             let new_prefix = if is_root_level {
@@ -302,6 +372,7 @@ impl FixtureDatabase {
                     definition_usage_counts,
                     skip_unused,
                     only_unused,
+                    editable_dirs,
                 );
             }
         }
