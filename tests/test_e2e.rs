@@ -12,6 +12,7 @@ use ntest::timeout;
 use predicates::prelude::*;
 use pytest_language_server::FixtureDatabase;
 use std::path::PathBuf;
+use tempfile::tempdir;
 
 // Helper function to normalize paths in output for cross-platform testing
 fn normalize_path_in_output(output: &str) -> String {
@@ -1385,5 +1386,189 @@ fn test_e2e_transitive_imports_go_to_definition() {
     assert_eq!(
         def.file_path, deep_fixtures_canonical,
         "Definition should be in nested/deep_fixtures.py"
+    );
+}
+
+// MARK: Editable Install CLI Tests
+
+/// Helper: set up a workspace with `.venv` containing an editable install whose
+/// source root lives in a *separate* temp directory (outside the workspace).
+/// Returns (workspace_tempdir, source_tempdir) so both stay alive for the test.
+fn setup_editable_install_workspace() -> (tempfile::TempDir, tempfile::TempDir) {
+    use std::fs;
+
+    let workspace = tempdir().unwrap();
+    let external_src = tempdir().unwrap();
+
+    // ── workspace files ──────────────────────────────────────────────────
+    let conftest = r#"
+import pytest
+
+@pytest.fixture
+def local_fixture():
+    """A fixture defined in the workspace."""
+    return "local"
+"#;
+    fs::write(workspace.path().join("conftest.py"), conftest).unwrap();
+
+    let test_file = r#"
+def test_uses_both(local_fixture, editable_plugin_fixture):
+    pass
+"#;
+    fs::write(workspace.path().join("test_example.py"), test_file).unwrap();
+
+    // ── external editable source root ────────────────────────────────────
+    let pkg_dir = external_src.path().join("myplugin");
+    fs::create_dir_all(&pkg_dir).unwrap();
+    fs::write(pkg_dir.join("__init__.py"), "").unwrap();
+
+    let plugin_content = r#"
+import pytest
+
+@pytest.fixture
+def editable_plugin_fixture():
+    """Fixture from an external editable install."""
+    return "editable"
+"#;
+    fs::write(pkg_dir.join("plugin.py"), plugin_content).unwrap();
+
+    // ── fake venv with site-packages ─────────────────────────────────────
+    let site_packages = workspace.path().join(".venv/lib/python3.12/site-packages");
+    fs::create_dir_all(&site_packages).unwrap();
+
+    // dist-info with direct_url.json marking it as editable
+    let dist_info = site_packages.join("myplugin-0.1.0.dist-info");
+    fs::create_dir_all(&dist_info).unwrap();
+
+    let direct_url = serde_json::json!({
+        "url": format!("file://{}", external_src.path().display()),
+        "dir_info": { "editable": true }
+    });
+    fs::write(
+        dist_info.join("direct_url.json"),
+        serde_json::to_string(&direct_url).unwrap(),
+    )
+    .unwrap();
+
+    // entry_points.txt so the scanner discovers the plugin module
+    let entry_points = "[pytest11]\nmyplugin = myplugin.plugin\n";
+    fs::write(dist_info.join("entry_points.txt"), entry_points).unwrap();
+
+    // .pth file pointing to the external source root
+    let pth_content = format!("{}\n", external_src.path().display());
+    fs::write(
+        site_packages.join("__editable__.myplugin-0.1.0.pth"),
+        &pth_content,
+    )
+    .unwrap();
+
+    (workspace, external_src)
+}
+
+#[test]
+#[timeout(30000)]
+fn test_e2e_editable_install_fixtures_in_tree() {
+    // Verifies that fixtures from an external editable install appear in the
+    // `fixtures list` output.  Before the fix, `print_tree_node` used
+    // `path.is_file()` which returned false for the remapped virtual path,
+    // so the fixture was silently dropped from the tree.
+    let (workspace, _src) = setup_editable_install_workspace();
+
+    let mut cmd = Command::cargo_bin("pytest-language-server").unwrap();
+    let output = cmd
+        .arg("fixtures")
+        .arg("list")
+        .arg(workspace.path())
+        .output()
+        .expect("Failed to execute command");
+
+    assert!(output.status.success(), "CLI should exit successfully");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // The editable install fixture must appear in the tree output.
+    assert!(
+        stdout.contains("editable_plugin_fixture"),
+        "Editable install fixture should appear in `fixtures list` output.\nGot:\n{}",
+        stdout
+    );
+
+    // The local fixture should still be there too.
+    assert!(
+        stdout.contains("local_fixture"),
+        "Local fixture should still appear in output.\nGot:\n{}",
+        stdout
+    );
+
+    // The editable install directory label should be annotated.
+    assert!(
+        stdout.contains("(editable install)"),
+        "Editable install directory should be labelled.\nGot:\n{}",
+        stdout
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_e2e_editable_install_fixtures_skip_unused() {
+    // With --skip-unused the editable fixture (which IS used by test_example.py)
+    // should still appear, and unused local fixtures should be hidden.
+    let (workspace, _src) = setup_editable_install_workspace();
+
+    let mut cmd = Command::cargo_bin("pytest-language-server").unwrap();
+    let output = cmd
+        .arg("fixtures")
+        .arg("list")
+        .arg("--skip-unused")
+        .arg(workspace.path())
+        .output()
+        .expect("Failed to execute command");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // editable_plugin_fixture is used by test_example.py → should be visible
+    assert!(
+        stdout.contains("editable_plugin_fixture"),
+        "Used editable fixture should appear with --skip-unused.\nGot:\n{}",
+        stdout
+    );
+
+    // local_fixture is also used → visible
+    assert!(
+        stdout.contains("local_fixture"),
+        "Used local fixture should appear with --skip-unused.\nGot:\n{}",
+        stdout
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_e2e_editable_install_fixtures_only_unused() {
+    // With --only-unused, the editable fixture (which IS used) should be hidden.
+    let (workspace, _src) = setup_editable_install_workspace();
+
+    let mut cmd = Command::cargo_bin("pytest-language-server").unwrap();
+    let output = cmd
+        .arg("fixtures")
+        .arg("list")
+        .arg("--only-unused")
+        .arg(workspace.path())
+        .output()
+        .expect("Failed to execute command");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Both fixtures are used → neither should appear in only-unused output
+    assert!(
+        !stdout.contains("editable_plugin_fixture"),
+        "Used editable fixture should NOT appear with --only-unused.\nGot:\n{}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("local_fixture"),
+        "Used local fixture should NOT appear with --only-unused.\nGot:\n{}",
+        stdout
     );
 }
