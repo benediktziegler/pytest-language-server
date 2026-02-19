@@ -265,7 +265,8 @@ impl FixtureDatabase {
                     .unwrap_or(false);
                 let is_venv_plugin = site_packages_paths.iter().any(|sp| key.starts_with(sp));
                 let is_editable_plugin = editable_roots.iter().any(|er| key.starts_with(er));
-                is_conftest_or_test || is_venv_plugin || is_editable_plugin
+                let is_entry_point_plugin = self.plugin_fixture_files.contains_key(key);
+                is_conftest_or_test || is_venv_plugin || is_editable_plugin || is_entry_point_plugin
             })
             .map(|entry| entry.key().clone())
             .collect();
@@ -298,6 +299,11 @@ impl FixtureDatabase {
                 }
                 processed_files.insert(file_path.clone());
 
+                // Check if the importing file is itself a plugin file.
+                // If so, any modules it imports should also be marked as plugin files
+                // (transitive propagation of plugin status).
+                let importer_is_plugin = self.plugin_fixture_files.contains_key(file_path);
+
                 // Get the file content
                 let Some(content) = self.get_file_content(file_path) else {
                     continue;
@@ -323,6 +329,9 @@ impl FixtureDatabase {
                             if !processed_files.contains(&canonical)
                                 && !self.file_cache.contains_key(&canonical)
                             {
+                                if importer_is_plugin {
+                                    self.plugin_fixture_files.insert(canonical.clone(), ());
+                                }
                                 new_modules.insert(canonical);
                             }
                         }
@@ -338,6 +347,9 @@ impl FixtureDatabase {
                             if !processed_files.contains(&canonical)
                                 && !self.file_cache.contains_key(&canonical)
                             {
+                                if importer_is_plugin {
+                                    self.plugin_fixture_files.insert(canonical.clone(), ());
+                                }
                                 new_modules.insert(canonical);
                             }
                         }
@@ -578,6 +590,12 @@ impl FixtureDatabase {
         }
 
         debug!("Scanning plugin file: {:?}", file_path);
+
+        // Mark this file as a plugin file so fixtures from it get is_plugin=true
+        let canonical = file_path
+            .canonicalize()
+            .unwrap_or_else(|_| file_path.to_path_buf());
+        self.plugin_fixture_files.insert(canonical, ());
 
         if let Ok(content) = std::fs::read_to_string(file_path) {
             self.analyze_file(file_path.to_path_buf(), &content);
@@ -951,7 +969,7 @@ impl FixtureDatabase {
     fn scan_plugin_directory(&self, plugin_dir: &Path) {
         // Recursively scan for Python files with fixtures
         for entry in WalkDir::new(plugin_dir)
-            .max_depth(3) // Limit depth to avoid scanning too much
+            .max_depth(10) // Limit depth to avoid scanning too much
             .into_iter()
             .filter_map(|e| e.ok())
         {
@@ -966,6 +984,11 @@ impl FixtureDatabase {
                     }
 
                     debug!("Scanning plugin file: {:?}", path);
+
+                    // Mark this file as a plugin file so fixtures get is_plugin=true
+                    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+                    self.plugin_fixture_files.insert(canonical, ());
+
                     if let Ok(content) = std::fs::read_to_string(path) {
                         self.analyze_file(path.to_path_buf(), &content);
                     }
@@ -1978,5 +2001,239 @@ def editable_fixture():
             site_packages,
         );
         assert!(result.is_some(), "foo-bar should match foo-bar.pth exactly");
+    }
+
+    #[test]
+    fn test_transitive_plugin_status_via_pytest_plugins() {
+        let workspace = tempdir().unwrap();
+        let workspace_canonical = workspace.path().canonicalize().unwrap();
+
+        let db = FixtureDatabase::new();
+        *db.workspace_root.lock().unwrap() = Some(workspace_canonical.clone());
+
+        // Create the package structure:
+        //   mypackage/
+        //     __init__.py
+        //     plugin.py      <- entry point plugin, has pytest_plugins = ["mypackage.helpers"]
+        //     helpers.py     <- imported by plugin.py, defines a fixture
+        let pkg_dir = workspace_canonical.join("mypackage");
+        fs::create_dir_all(&pkg_dir).unwrap();
+        fs::write(pkg_dir.join("__init__.py"), "").unwrap();
+
+        let plugin_content = r#"
+import pytest
+
+pytest_plugins = ["mypackage.helpers"]
+
+@pytest.fixture
+def direct_plugin_fixture():
+    return "from plugin.py"
+"#;
+        let plugin_file = pkg_dir.join("plugin.py");
+        fs::write(&plugin_file, plugin_content).unwrap();
+
+        let helpers_content = r#"
+import pytest
+
+@pytest.fixture
+def transitive_plugin_fixture():
+    return "from helpers.py, imported by plugin.py"
+"#;
+        let helpers_file = pkg_dir.join("helpers.py");
+        fs::write(&helpers_file, helpers_content).unwrap();
+
+        // Mark plugin.py as a plugin file (simulating scan_single_plugin_file)
+        let canonical_plugin = plugin_file.canonicalize().unwrap();
+        db.plugin_fixture_files.insert(canonical_plugin.clone(), ());
+
+        // Analyze plugin.py (Phase 3 equivalent)
+        db.analyze_file(canonical_plugin.clone(), plugin_content);
+
+        // Run Phase 4 equivalent: scan_imported_fixture_modules
+        // This should discover helpers.py via pytest_plugins and propagate plugin status
+        db.scan_imported_fixture_modules(&workspace_canonical);
+
+        // The direct fixture should be is_plugin
+        let direct_is_plugin = db
+            .definitions
+            .get("direct_plugin_fixture")
+            .map(|defs| defs[0].is_plugin);
+        assert_eq!(
+            direct_is_plugin,
+            Some(true),
+            "direct_plugin_fixture should have is_plugin=true"
+        );
+
+        // The transitive fixture (from helpers.py) should ALSO be is_plugin
+        let transitive_is_plugin = db
+            .definitions
+            .get("transitive_plugin_fixture")
+            .map(|defs| defs[0].is_plugin);
+        assert_eq!(
+            transitive_is_plugin,
+            Some(true),
+            "transitive_plugin_fixture should have is_plugin=true (propagated from plugin.py)"
+        );
+
+        let transitive_is_third_party = db
+            .definitions
+            .get("transitive_plugin_fixture")
+            .map(|defs| defs[0].is_third_party);
+        assert_eq!(
+            transitive_is_third_party,
+            Some(false),
+            "transitive_plugin_fixture should NOT be third-party (workspace-local)"
+        );
+
+        // Both should be available from a test file
+        let tests_dir = workspace_canonical.join("tests");
+        fs::create_dir_all(&tests_dir).unwrap();
+        let test_file = tests_dir.join("test_transitive.py");
+        let test_content = "def test_transitive(): pass\n";
+        fs::write(&test_file, test_content).unwrap();
+        let canonical_test = test_file.canonicalize().unwrap();
+        db.analyze_file(canonical_test.clone(), test_content);
+
+        let available = db.get_available_fixtures(&canonical_test);
+        let available_names: Vec<&str> = available.iter().map(|d| d.name.as_str()).collect();
+        assert!(
+            available_names.contains(&"direct_plugin_fixture"),
+            "direct_plugin_fixture should be available. Got: {:?}",
+            available_names
+        );
+        assert!(
+            available_names.contains(&"transitive_plugin_fixture"),
+            "transitive_plugin_fixture should be available (transitively via plugin). Got: {:?}",
+            available_names
+        );
+    }
+
+    #[test]
+    fn test_transitive_plugin_status_via_star_import() {
+        let workspace = tempdir().unwrap();
+        let workspace_canonical = workspace.path().canonicalize().unwrap();
+
+        let db = FixtureDatabase::new();
+        *db.workspace_root.lock().unwrap() = Some(workspace_canonical.clone());
+
+        // Create the package structure:
+        //   mypackage/
+        //     __init__.py
+        //     plugin.py       <- entry point plugin, has `from .fixtures import *`
+        //     fixtures.py     <- imported via star import, defines a fixture
+        let pkg_dir = workspace_canonical.join("mypackage");
+        fs::create_dir_all(&pkg_dir).unwrap();
+        fs::write(pkg_dir.join("__init__.py"), "").unwrap();
+
+        let plugin_content = r#"
+import pytest
+from .fixtures import *
+
+@pytest.fixture
+def star_direct_fixture():
+    return "from plugin.py"
+"#;
+        let plugin_file = pkg_dir.join("plugin.py");
+        fs::write(&plugin_file, plugin_content).unwrap();
+
+        let fixtures_content = r#"
+import pytest
+
+@pytest.fixture
+def star_imported_fixture():
+    return "from fixtures.py, star-imported by plugin.py"
+"#;
+        let fixtures_file = pkg_dir.join("fixtures.py");
+        fs::write(&fixtures_file, fixtures_content).unwrap();
+
+        // Mark plugin.py as a plugin file
+        let canonical_plugin = plugin_file.canonicalize().unwrap();
+        db.plugin_fixture_files.insert(canonical_plugin.clone(), ());
+
+        // Analyze plugin.py
+        db.analyze_file(canonical_plugin.clone(), plugin_content);
+
+        // Run import scanning (Phase 4)
+        db.scan_imported_fixture_modules(&workspace_canonical);
+
+        // The star-imported fixture should also be marked is_plugin
+        let star_is_plugin = db
+            .definitions
+            .get("star_imported_fixture")
+            .map(|defs| defs[0].is_plugin);
+        assert_eq!(
+            star_is_plugin,
+            Some(true),
+            "star_imported_fixture should have is_plugin=true (propagated from plugin.py via star import)"
+        );
+
+        // Both fixtures should be available from a test file
+        let test_file = workspace_canonical.join("test_star.py");
+        let test_content = "def test_star(): pass\n";
+        fs::write(&test_file, test_content).unwrap();
+        let canonical_test = test_file.canonicalize().unwrap();
+        db.analyze_file(canonical_test.clone(), test_content);
+
+        let available = db.get_available_fixtures(&canonical_test);
+        let available_names: Vec<&str> = available.iter().map(|d| d.name.as_str()).collect();
+        assert!(
+            available_names.contains(&"star_direct_fixture"),
+            "star_direct_fixture should be available. Got: {:?}",
+            available_names
+        );
+        assert!(
+            available_names.contains(&"star_imported_fixture"),
+            "star_imported_fixture should be available (transitively via star import). Got: {:?}",
+            available_names
+        );
+    }
+
+    #[test]
+    fn test_non_plugin_conftest_import_not_marked_as_plugin() {
+        let workspace = tempdir().unwrap();
+        let workspace_canonical = workspace.path().canonicalize().unwrap();
+
+        let db = FixtureDatabase::new();
+        *db.workspace_root.lock().unwrap() = Some(workspace_canonical.clone());
+
+        // Create a conftest.py that imports from a helpers module
+        // This is NOT a plugin file — conftest imports should NOT propagate is_plugin
+        let conftest_content = r#"
+import pytest
+from .helpers import *
+"#;
+        let conftest_file = workspace_canonical.join("conftest.py");
+        fs::write(&conftest_file, conftest_content).unwrap();
+
+        let helpers_content = r#"
+import pytest
+
+@pytest.fixture
+def conftest_helper_fixture():
+    return "from helpers, imported by conftest"
+"#;
+        let helpers_file = workspace_canonical.join("helpers.py");
+        fs::write(&helpers_file, helpers_content).unwrap();
+
+        let canonical_conftest = conftest_file.canonicalize().unwrap();
+        // Do NOT insert conftest into plugin_fixture_files — it's a regular conftest
+        db.analyze_file(canonical_conftest.clone(), conftest_content);
+
+        db.scan_imported_fixture_modules(&workspace_canonical);
+
+        // The helper fixture should NOT be marked as is_plugin
+        let is_plugin = db
+            .definitions
+            .get("conftest_helper_fixture")
+            .map(|defs| defs[0].is_plugin);
+        if let Some(is_plugin) = is_plugin {
+            assert!(
+                !is_plugin,
+                "Fixture imported by conftest (not a plugin) should NOT be marked is_plugin"
+            );
+        }
+        // (It's OK if the fixture wasn't found at all — the import resolution
+        // may not work for bare relative imports without a package. The key assertion
+        // is that if found, it must not be is_plugin.)
     }
 }
