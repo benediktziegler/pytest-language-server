@@ -11940,9 +11940,8 @@ def test_uses_plugin(direct_plugin_fixture, transitive_plugin_fixture, root_conf
     );
 
     // 7. find_fixture_definition (go-to-definition) should work
-    //    Line 1 (0-based), "direct_plugin_fixture" starts around char 20
-    //    Let's find19
-    let goto = db.find_fixture_definition(&canonical_test, 1, 19);
+    //    Line 1 (0-based), "direct_plugin_fixture" starts at char 21
+    let goto = db.find_fixture_definition(&canonical_test, 1, 21);
     assert!(
         goto.is_some(),
         "find_fixture_definition should resolve direct_plugin_fixture from the test file"
