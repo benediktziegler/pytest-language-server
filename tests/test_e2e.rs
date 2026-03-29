@@ -30,6 +30,22 @@ fn normalize_path_in_output(output: &str) -> String {
     )
 }
 
+// MARK: Smoke Tests
+
+/// Verifies the binary can be invoked without any extra feature flags.
+/// This test fails when `required-features = ["lsp_force_exit"]` is set on the
+/// `[[bin]]` entry in Cargo.toml, because `cargo test` skips building binary
+/// targets whose required features are not enabled.
+#[test]
+#[timeout(30000)]
+fn test_binary_available_without_extra_features() {
+    Command::cargo_bin("pytest-language-server")
+        .unwrap()
+        .arg("--version")
+        .assert()
+        .success();
+}
+
 // MARK: CLI E2E Tests
 
 #[test]
