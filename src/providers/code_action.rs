@@ -198,6 +198,124 @@ fn kind_requested(only: &Option<Vec<CodeActionKind>>, action_kind: &CodeActionKi
     })
 }
 
+// ── Parameter-insertion helpers ──────────────────────────────────────────────
+
+/// Maximum number of lines to scan forward from a `def` line when searching
+/// for the closing `)` of a function's parameter list.
+const MAX_SIGNATURE_SCAN_LINES: usize = 50;
+
+/// Describes where a new parameter should be inserted in a function signature.
+struct ParamInsertionPoint {
+    /// 0-indexed line containing the closing `)` of the parameter list.
+    close_line: usize,
+    /// Byte position of `)` within `close_line`.
+    close_char: usize,
+    /// Whether there are already parameters between `(` and `)`.
+    has_params: bool,
+    /// For multi-line signatures where `)` sits alone on its own line: the
+    /// indentation string to use when inserting a new parameter line.
+    /// `None` for inline (single-line) signatures.
+    multiline_indent: Option<String>,
+}
+
+/// Locate the closing `)` of a Python function's parameter list.
+///
+/// Starting from `def_line` (0-indexed), scans forward through `lines` using
+/// parenthesis-depth tracking to find the `)` that closes the function
+/// parameter list.  Verifies that `:` appears after the `)` (possibly
+/// following a `-> T` return annotation) to distinguish the parameter-list
+/// close from any `)` inside a default-value expression.
+///
+/// Returns `None` if no valid closing `)` is found within the next
+/// [`MAX_SIGNATURE_SCAN_LINES`] lines.
+fn find_param_insertion_point(lines: &[&str], def_line: usize) -> Option<ParamInsertionPoint> {
+    let mut paren_depth: u32 = 0;
+    let mut found_open = false;
+    let mut open_line = 0usize;
+    let mut open_char = 0usize;
+    let end = lines.len().min(def_line + MAX_SIGNATURE_SCAN_LINES);
+
+    for i in def_line..end {
+        let line = lines[i];
+        for (j, ch) in line.char_indices() {
+            if !found_open {
+                if ch == '(' {
+                    paren_depth = 1;
+                    found_open = true;
+                    open_line = i;
+                    open_char = j;
+                }
+                continue;
+            }
+            if ch == '(' {
+                paren_depth += 1;
+            } else if ch == ')' && paren_depth > 0 {
+                paren_depth -= 1;
+                if paren_depth == 0 {
+                    // Verify `:` appears after this `)` (on this line or soon
+                    // after), confirming this is the end of the function
+                    // signature and not a `)` inside a default-value expression.
+                    let after = &line[j + ')'.len_utf8()..];
+                    let colon_follows = after.contains(':')
+                        || lines
+                            .get(i + 1..end)
+                            .map_or(false, |rest| rest.iter().take(3).any(|l| l.contains(':')));
+                    if !colon_follows {
+                        return None;
+                    }
+
+                    // Determine whether `)` sits alone on its line (multi-line style).
+                    let before_close = &line[..j];
+                    let paren_alone = before_close.trim().is_empty();
+
+                    // Determine whether there are already parameters.
+                    let has_params = if open_line == i {
+                        // Same line: check between `(` and `)`.
+                        !line[open_char + 1..j].trim().is_empty()
+                    } else {
+                        // Multi-line: any non-empty content between `(` and `)`.
+                        let after_open = &lines[open_line][open_char + 1..];
+                        !after_open.trim().is_empty()
+                            || lines[open_line + 1..i]
+                                .iter()
+                                .any(|l| !l.trim().is_empty())
+                            || !before_close.trim().is_empty()
+                    };
+
+                    // Derive indentation for multi-line insertion.
+                    let multiline_indent = if paren_alone {
+                        let indent = if open_line < i {
+                            // Use the indentation of the first existing param line.
+                            lines[open_line + 1..i]
+                                .iter()
+                                .find(|l| !l.trim().is_empty())
+                                .map(|l| {
+                                    let trimmed = l.trim_start();
+                                    l[..l.len() - trimmed.len()].to_string()
+                                })
+                                .unwrap_or_else(|| "    ".to_string())
+                        } else {
+                            "    ".to_string()
+                        };
+                        Some(indent)
+                    } else {
+                        None
+                    };
+
+                    return Some(ParamInsertionPoint {
+                        close_line: i,
+                        close_char: j,
+                        has_params,
+                        multiline_indent,
+                    });
+                }
+            }
+        }
+    }
+
+    None
+}
+
 // ── Import-edit helpers (isort-aware) ────────────────────────────────────────
 
 /// Parse a `from X import Y` style import statement.
@@ -874,48 +992,34 @@ impl Backend {
                 // ── Build the parameter insertion TextEdit ───────────────────
                 let function_line = Self::internal_line_to_lsp(fixture.function_line);
 
-                let Some(func_line_content) = lines.get(function_line as usize) else {
+                // Find the closing `)` of the function signature, handling
+                // single-line with `-> T:` return annotations and multi-line
+                // signatures.
+                let Some(insertion) =
+                    find_param_insertion_point(&lines, function_line as usize)
+                else {
                     warn!(
-                        "Function line {} is out of range in {:?}",
-                        function_line, file_path
+                        "Could not find param insertion point in {:?} at line {}",
+                        file_path, function_line
                     );
                     continue;
                 };
 
-                // Locate the closing `):` of the function signature.
-                let Some(paren_pos) = func_line_content.find("):") else {
-                    continue;
-                };
-
-                if !func_line_content[..paren_pos].contains('(') {
-                    continue;
-                }
-
-                let param_start = match func_line_content.find('(') {
-                    Some(pos) => pos + 1,
-                    None => {
-                        warn!(
-                            "Invalid function signature at {:?}:{}",
-                            file_path, function_line
-                        );
-                        continue;
-                    }
-                };
-
-                let params_section = &func_line_content[param_start..paren_pos];
-                let has_params = !params_section.trim().is_empty();
-
-                let (insert_line, insert_char) = if has_params {
-                    (function_line, paren_pos as u32)
-                } else {
-                    (function_line, param_start as u32)
-                };
-
-                let param_text = if has_params {
-                    format!(", {}{}", fixture.name, type_suffix)
-                } else {
-                    format!("{}{}", fixture.name, type_suffix)
-                };
+                let (insert_line, insert_char, param_text) =
+                    if let Some(ref indent) = insertion.multiline_indent {
+                        // Multi-line style: insert a new indented line before `)`.
+                        let text =
+                            format!("{}{}{},\n", indent, fixture.name, type_suffix);
+                        (insertion.close_line as u32, 0u32, text)
+                    } else {
+                        // Inline style: insert before `)`.
+                        let text = if insertion.has_params {
+                            format!(", {}{}", fixture.name, type_suffix)
+                        } else {
+                            format!("{}{}", fixture.name, type_suffix)
+                        };
+                        (insertion.close_line as u32, insertion.close_char as u32, text)
+                    };
 
                 // ── Build import + parameter edits ───────────────────────────
                 let spec_refs: Vec<&TypeImportSpec> = return_type_imports.iter().collect();
@@ -2427,6 +2531,107 @@ mod tests {
             "Both specs should be dropped: {:?}",
             remaining
         );
+    }
+
+    // ── find_param_insertion_point tests ─────────────────────────────────
+
+    #[test]
+    fn test_quickfix_insert_single_line_no_annotation() {
+        // "def test_foo(fixture_a):" — baseline single-line case.
+        let lines = vec!["def test_foo(fixture_a):"];
+        let r = find_param_insertion_point(&lines, 0).unwrap();
+        assert_eq!(r.close_line, 0);
+        assert_eq!(r.close_char, 22); // position of ')'
+        assert!(r.has_params);
+        assert!(r.multiline_indent.is_none());
+    }
+
+    #[test]
+    fn test_quickfix_insert_single_line_return_annotation() {
+        // "def test_foo(fixture_a) -> None:" — `)` not immediately before `:`.
+        let lines = vec!["def test_foo(fixture_a) -> None:"];
+        let r = find_param_insertion_point(&lines, 0).unwrap();
+        assert_eq!(r.close_line, 0);
+        assert_eq!(r.close_char, 22);
+        assert!(r.has_params);
+        assert!(r.multiline_indent.is_none());
+    }
+
+    #[test]
+    fn test_quickfix_insert_single_line_complex_return_annotation() {
+        // "def test_foo(fixture_a) -> dict[str, int]:" — complex annotation.
+        let lines = vec!["def test_foo(fixture_a) -> dict[str, int]:"];
+        let r = find_param_insertion_point(&lines, 0).unwrap();
+        assert_eq!(r.close_line, 0);
+        assert_eq!(r.close_char, 22);
+        assert!(r.has_params);
+        assert!(r.multiline_indent.is_none());
+    }
+
+    #[test]
+    fn test_quickfix_insert_single_line_empty_params_with_annotation() {
+        // "def test_foo() -> None:" — no params, return annotation.
+        let lines = vec!["def test_foo() -> None:"];
+        let r = find_param_insertion_point(&lines, 0).unwrap();
+        assert_eq!(r.close_line, 0);
+        assert_eq!(r.close_char, 13); // position of ')'
+        assert!(!r.has_params);
+        assert!(r.multiline_indent.is_none());
+    }
+
+    #[test]
+    fn test_quickfix_insert_multiline_no_annotation() {
+        // "def test_foo(\n    fixture_a,\n):" — `)` alone on its line.
+        let lines = vec!["def test_foo(", "    fixture_a,", "):"];
+        let r = find_param_insertion_point(&lines, 0).unwrap();
+        assert_eq!(r.close_line, 2);
+        assert_eq!(r.close_char, 0);
+        assert!(r.has_params);
+        assert_eq!(r.multiline_indent.as_deref(), Some("    "));
+    }
+
+    #[test]
+    fn test_quickfix_insert_multiline_with_return_annotation() {
+        // "def test_foo(\n    fixture_a,\n) -> None:" — multi-line + annotation.
+        let lines = vec!["def test_foo(", "    fixture_a,", ") -> None:"];
+        let r = find_param_insertion_point(&lines, 0).unwrap();
+        assert_eq!(r.close_line, 2);
+        assert_eq!(r.close_char, 0);
+        assert!(r.has_params);
+        assert_eq!(r.multiline_indent.as_deref(), Some("    "));
+    }
+
+    #[test]
+    fn test_quickfix_insert_multiline_empty_params() {
+        // "def test_foo(\n) -> None:" — `)` alone, no existing params.
+        let lines = vec!["def test_foo(", ") -> None:"];
+        let r = find_param_insertion_point(&lines, 0).unwrap();
+        assert_eq!(r.close_line, 1);
+        assert_eq!(r.close_char, 0);
+        assert!(!r.has_params);
+        assert_eq!(r.multiline_indent.as_deref(), Some("    "));
+    }
+
+    #[test]
+    fn test_quickfix_insert_multiline_closing_paren_inline() {
+        // "def test_foo(\n    fixture_a) -> None:" — `)` on same line as param.
+        let lines = vec!["def test_foo(", "    fixture_a) -> None:"];
+        let r = find_param_insertion_point(&lines, 0).unwrap();
+        assert_eq!(r.close_line, 1);
+        assert_eq!(r.close_char, 13); // `)` comes after "    fixture_a"
+        assert!(r.has_params);
+        assert!(r.multiline_indent.is_none(), "paren not alone → inline style");
+    }
+
+    #[test]
+    fn test_quickfix_insert_default_value_with_nested_paren() {
+        // "def test_foo(x=dict()):" — nested paren in default value.
+        let lines = vec!["def test_foo(x=dict()):"];
+        let r = find_param_insertion_point(&lines, 0).unwrap();
+        assert_eq!(r.close_line, 0);
+        // `)` of the param list is after `dict()`
+        assert!(r.has_params);
+        assert!(r.multiline_indent.is_none());
     }
 
     // ── replace_identifier tests live in src/fixtures/string_utils.rs ────

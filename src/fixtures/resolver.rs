@@ -1323,46 +1323,65 @@ impl FixtureDatabase {
         let content = self.get_file_content(file_path)?;
         let lines: Vec<&str> = content.lines().collect();
 
-        for i in (function_line.saturating_sub(1))..lines.len().min(function_line + 10) {
-            let line = lines[i];
-            if let Some(paren_pos) = line.find("):") {
-                let has_params = if let Some(open_pos) = line.find('(') {
-                    if open_pos < paren_pos {
-                        let params_section = &line[open_pos + 1..paren_pos];
-                        !params_section.trim().is_empty()
-                    } else {
-                        true
-                    }
-                } else {
-                    let before_close = &line[..paren_pos];
-                    if !before_close.trim().is_empty() {
-                        true
-                    } else {
-                        let mut found_params = false;
-                        for prev_line in lines.iter().take(i).skip(function_line.saturating_sub(1))
-                        {
-                            if prev_line.contains('(') {
-                                if let Some(open_pos) = prev_line.find('(') {
-                                    let after_open = &prev_line[open_pos + 1..];
-                                    if !after_open.trim().is_empty() {
-                                        found_params = true;
-                                        break;
-                                    }
-                                }
-                            } else if !prev_line.trim().is_empty() {
-                                found_params = true;
-                                break;
-                            }
-                        }
-                        found_params
-                    }
-                };
+        // Maximum number of lines to scan forward from the def line.
+        const MAX_SIGNATURE_SCAN_LINES: usize = 50;
 
-                return Some(ParamInsertionInfo {
-                    line: i + 1,
-                    char_pos: paren_pos,
-                    needs_comma: has_params,
-                });
+        let def_line = function_line.saturating_sub(1);
+        let end = lines.len().min(def_line + MAX_SIGNATURE_SCAN_LINES);
+
+        let mut paren_depth: u32 = 0;
+        let mut found_open = false;
+        let mut open_line = 0usize;
+        let mut open_char = 0usize;
+
+        for i in def_line..end {
+            let line = lines[i];
+            for (j, ch) in line.char_indices() {
+                if !found_open {
+                    if ch == '(' {
+                        paren_depth = 1;
+                        found_open = true;
+                        open_line = i;
+                        open_char = j;
+                    }
+                    continue;
+                }
+                if ch == '(' {
+                    paren_depth += 1;
+                } else if ch == ')' && paren_depth > 0 {
+                    paren_depth -= 1;
+                    if paren_depth == 0 {
+                        // Verify `:` appears after this `)` (on this line or
+                        // soon after) to confirm this is the function
+                        // signature's closing `)`.
+                        let after = &line[j + ')'.len_utf8()..];
+                        let colon_follows = after.contains(':')
+                            || lines
+                                .get(i + 1..end)
+                                .map_or(false, |rest| rest.iter().take(3).any(|l| l.contains(':')));
+                        if !colon_follows {
+                            return None;
+                        }
+
+                        let has_params = if open_line == i {
+                            !line[open_char + 1..j].trim().is_empty()
+                        } else {
+                            let after_open = &lines[open_line][open_char + 1..];
+                            let before_close = &line[..j];
+                            !after_open.trim().is_empty()
+                                || lines[open_line + 1..i]
+                                    .iter()
+                                    .any(|l| !l.trim().is_empty())
+                                || !before_close.trim().is_empty()
+                        };
+
+                        return Some(ParamInsertionInfo {
+                            line: i + 1,
+                            char_pos: j,
+                            needs_comma: has_params,
+                        });
+                    }
+                }
             }
         }
 
