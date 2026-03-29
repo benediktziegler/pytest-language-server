@@ -6996,3 +6996,276 @@ def test_something():
         }
     }
 }
+
+// ============================================================================
+// QUICKFIX: MULTI-LINE SIGNATURES AND RETURN ANNOTATIONS
+// ============================================================================
+
+/// Helper: build the standard quickfix params and call handle_code_action,
+/// returning the resulting workspace-edit text edits.
+async fn run_quickfix_for_undeclared(
+    content: &str,
+    conftest_content: &str,
+    fixture_name: &str,
+    dir_name: &str,
+) -> Vec<tower_lsp_server::ls_types::TextEdit> {
+    use pytest_language_server::{Backend, FixtureDatabase};
+    use tower_lsp_server::LspService;
+
+    let db = Arc::new(FixtureDatabase::new());
+
+    let dir = std::env::temp_dir().join(dir_name);
+    let conftest_path = dir.join("conftest.py");
+    let test_path = dir.join("test_example.py");
+
+    db.analyze_file(conftest_path.clone(), conftest_content);
+    db.analyze_file(test_path.clone(), content);
+
+    let undeclared = db.get_undeclared_fixtures(&test_path);
+    let fix = undeclared
+        .iter()
+        .find(|f| f.name == fixture_name)
+        .unwrap_or_else(|| panic!("Expected undeclared fixture '{}'", fixture_name));
+
+    let backend_slot: Arc<std::sync::Mutex<Option<Backend>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let slot_clone = backend_slot.clone();
+    let (_svc, _sock) = LspService::new(move |client| {
+        let b = Backend::new(client, db.clone());
+        *slot_clone.lock().unwrap() = Some(Backend {
+            client: b.client.clone(),
+            fixture_db: b.fixture_db.clone(),
+            workspace_root: b.workspace_root.clone(),
+            original_workspace_root: b.original_workspace_root.clone(),
+            scan_task: b.scan_task.clone(),
+            uri_cache: b.uri_cache.clone(),
+            config: b.config.clone(),
+        });
+        b
+    });
+    let backend = backend_slot.lock().unwrap().take().unwrap();
+
+    let uri = Uri::from_file_path(&test_path).unwrap();
+
+    let diag_line_lsp = (fix.line - 1) as u32;
+    let func_line_lsp = (fix.function_line - 1) as u32;
+
+    let diagnostic = Diagnostic {
+        range: Range {
+            start: Position {
+                line: diag_line_lsp,
+                character: fix.start_char as u32,
+            },
+            end: Position {
+                line: diag_line_lsp,
+                character: fix.end_char as u32,
+            },
+        },
+        severity: Some(DiagnosticSeverity::WARNING),
+        code: Some(NumberOrString::String("undeclared-fixture".to_string())),
+        source: Some("pytest-lsp".to_string()),
+        message: format!("Fixture '{}' is used but not declared as a parameter", fix.name),
+        code_description: None,
+        related_information: None,
+        tags: None,
+        data: None,
+    };
+
+    let params = CodeActionParams {
+        text_document: TextDocumentIdentifier { uri: uri.clone() },
+        range: Range {
+            start: Position { line: func_line_lsp, character: 0 },
+            end: Position { line: func_line_lsp, character: 0 },
+        },
+        context: CodeActionContext {
+            diagnostics: vec![diagnostic],
+            only: None,
+            trigger_kind: None,
+        },
+        work_done_progress_params: WorkDoneProgressParams { work_done_token: None },
+        partial_result_params: PartialResultParams { partial_result_token: None },
+    };
+
+    let response = backend.handle_code_action(params).await.unwrap();
+    let actions = response.expect("Should return code actions");
+
+    let quickfix = actions
+        .iter()
+        .find_map(|a| match a {
+            CodeActionOrCommand::CodeAction(ca) if ca.kind == Some(CodeActionKind::QUICKFIX) => {
+                Some(ca)
+            }
+            _ => None,
+        })
+        .expect("Should have a quickfix code action");
+
+    let ws_edit = quickfix.edit.as_ref().expect("Should have workspace edit");
+    let changes = ws_edit.changes.as_ref().expect("Should have changes");
+    changes.values().flat_map(|v| v.iter().cloned()).collect()
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_quickfix_adds_param_to_function_with_return_annotation() {
+    // Single-line signature with `-> None:` return annotation.
+    // Before: def test_foo(fixture_a) -> None:
+    // After:  def test_foo(fixture_a, fixture_b: FooType) -> None:
+    let conftest = r#"
+import pytest
+
+class FooType:
+    pass
+
+@pytest.fixture
+def fixture_b() -> FooType:
+    return FooType()
+"#;
+
+    let test_content = "def test_foo(fixture_a) -> None:\n    result = fixture_b\n";
+
+    let edits = run_quickfix_for_undeclared(
+        test_content,
+        conftest,
+        "fixture_b",
+        "test_qf_return_annotation",
+    )
+    .await;
+
+    let param_edit = edits
+        .iter()
+        .find(|e| e.new_text.contains("fixture_b"))
+        .expect("Should have param insertion edit");
+
+    // The insertion should be at the ')' position (inline style).
+    assert!(
+        param_edit.new_text.starts_with(", fixture_b"),
+        "Should insert ', fixture_b ...' before ')': {:?}",
+        param_edit.new_text
+    );
+    // The edit should target the single def line.
+    assert_eq!(
+        param_edit.range.start.line, 0,
+        "Edit should be on the def line (line 0)"
+    );
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_quickfix_adds_param_to_multiline_signature() {
+    // Multi-line signature with return annotation.
+    // Before:
+    //   def test_foo(
+    //       fixture_a,
+    //   ) -> None:
+    // After:
+    //   def test_foo(
+    //       fixture_a,
+    //       fixture_b: FooType,
+    //   ) -> None:
+    let conftest = r#"
+import pytest
+
+class FooType:
+    pass
+
+@pytest.fixture
+def fixture_b() -> FooType:
+    return FooType()
+"#;
+
+    let test_content =
+        "def test_foo(\n    fixture_a,\n) -> None:\n    result = fixture_b\n";
+
+    let edits = run_quickfix_for_undeclared(
+        test_content,
+        conftest,
+        "fixture_b",
+        "test_qf_multiline_sig",
+    )
+    .await;
+
+    let param_edit = edits
+        .iter()
+        .find(|e| e.new_text.contains("fixture_b"))
+        .expect("Should have param insertion edit");
+
+    // Multi-line style: new line inserted before the closing ')'.
+    assert!(
+        param_edit.new_text.starts_with("    fixture_b"),
+        "Should start with indented 'fixture_b': {:?}",
+        param_edit.new_text
+    );
+    assert!(
+        param_edit.new_text.ends_with(",\n"),
+        "Should end with ',\\n' for multi-line style: {:?}",
+        param_edit.new_text
+    );
+    // The edit should be at character 0 of the ')' line (line 2).
+    assert_eq!(
+        param_edit.range.start.line, 2,
+        "Edit should be at the closing ')' line"
+    );
+    assert_eq!(
+        param_edit.range.start.character, 0,
+        "Edit should be at character 0 (start of ')' line)"
+    );
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_quickfix_adds_param_to_empty_multiline_signature() {
+    // Multi-line signature with empty params and return annotation.
+    // Before:
+    //   def test_foo(
+    //   ) -> None:
+    // After:
+    //   def test_foo(
+    //       fixture_a: FooType,
+    //   ) -> None:
+    let conftest = r#"
+import pytest
+
+class FooType:
+    pass
+
+@pytest.fixture
+def fixture_a() -> FooType:
+    return FooType()
+"#;
+
+    let test_content = "def test_foo(\n) -> None:\n    result = fixture_a\n";
+
+    let edits = run_quickfix_for_undeclared(
+        test_content,
+        conftest,
+        "fixture_a",
+        "test_qf_empty_multiline",
+    )
+    .await;
+
+    let param_edit = edits
+        .iter()
+        .find(|e| e.new_text.contains("fixture_a"))
+        .expect("Should have param insertion edit");
+
+    // Multi-line style: new line inserted before the closing ')'.
+    assert!(
+        param_edit.new_text.starts_with("    fixture_a"),
+        "Should start with indented 'fixture_a': {:?}",
+        param_edit.new_text
+    );
+    assert!(
+        param_edit.new_text.ends_with(",\n"),
+        "Should end with ',\\n': {:?}",
+        param_edit.new_text
+    );
+    // The edit should be at character 0 of the ')' line (line 1).
+    assert_eq!(
+        param_edit.range.start.line, 1,
+        "Edit should be at the closing ')' line"
+    );
+    assert_eq!(
+        param_edit.range.start.character, 0,
+        "Edit should be at character 0"
+    );
+}
