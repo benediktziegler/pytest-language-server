@@ -70,28 +70,47 @@ struct ImportGroup {
     kind: ImportKind,
 }
 
-/// Extract the top-level package name from an import line.
+/// Extract the top-level package names from an import line.
 ///
-/// - `"from typing import Any"`         → `"typing"`
-/// - `"from collections.abc import X"`  → `"collections"`
-/// - `"import pathlib"`                 → `"pathlib"`
-/// - `"import os.path"`                 → `"os"`
-fn extract_top_level_module(line: &str) -> &str {
+/// - `"from typing import Any"`         → `["typing"]`
+/// - `"from collections.abc import X"`  → `["collections"]`
+/// - `"import pathlib"`                 → `["pathlib"]`
+/// - `"import os.path"`                 → `["os"]`
+/// - `"import os, sys"`                 → `["os", "sys"]`
+fn extract_top_level_modules(line: &str) -> Vec<&str> {
     let trimmed = line.trim();
-    let module_str = if let Some(rest) = trimmed.strip_prefix("from ") {
-        rest.split_whitespace().next().unwrap_or("")
+    if let Some(rest) = trimmed.strip_prefix("from ") {
+        // `from X import Y` — only one module on the left-hand side.
+        let module_str = rest.split_whitespace().next().unwrap_or("");
+        // "collections.abc" → "collections"
+        let top = module_str.split('.').next().unwrap_or("");
+        if top.is_empty() {
+            vec![]
+        } else {
+            vec![top]
+        }
     } else if let Some(rest) = trimmed.strip_prefix("import ") {
-        rest.split_whitespace().next().unwrap_or("")
+        // `import os, sys` or `import os` — one or more comma-separated names.
+        rest.split(',')
+            .filter_map(|m| {
+                // Each entry may be `os`, `os as operating_system`, `os.path`, etc.
+                let name = m.trim().split_whitespace().next().unwrap_or("");
+                // "os.path" → "os"
+                let top = name.split('.').next().unwrap_or("");
+                if top.is_empty() { None } else { Some(top) }
+            })
+            .collect()
     } else {
-        return "";
-    };
-    // "collections.abc" → "collections", "os.path" → "os"
-    module_str.split('.').next().unwrap_or("")
+        vec![]
+    }
 }
 
 /// Classify an import statement string as stdlib or third-party.
 fn classify_import_statement(statement: &str) -> ImportKind {
-    let top = extract_top_level_module(statement);
+    let top = extract_top_level_modules(statement)
+        .into_iter()
+        .next()
+        .unwrap_or("");
     if is_stdlib_module(top) {
         ImportKind::Stdlib
     } else {
@@ -114,14 +133,31 @@ fn parse_import_groups(lines: &[&str]) -> Vec<ImportGroup> {
     let mut current_last: usize = 0;
     let mut current_kind = ImportKind::ThirdParty;
     let mut seen_any_import = false;
+    let mut in_multiline = false;
 
     for (i, &line) in lines.iter().enumerate() {
+        // If we're inside a multiline import (opened with `(`), consume lines
+        // until the closing `)` is found.  Strip inline comments before checking
+        // so that `)` inside a comment (e.g. `    moda,  # type: ignore (reason)`)
+        // does not prematurely end the multiline block.
+        if in_multiline {
+            current_last = i;
+            let line_no_comment = line.split('#').next().unwrap_or("").trim_end();
+            if line_no_comment.contains(')') {
+                in_multiline = false;
+            }
+            continue;
+        }
+
         // Module-level (unindented) import.
         if line.starts_with("import ") || line.starts_with("from ") {
             seen_any_import = true;
             if current_start.is_none() {
                 current_start = Some(i);
-                let module = extract_top_level_module(line);
+                let module = extract_top_level_modules(line)
+                    .into_iter()
+                    .next()
+                    .unwrap_or("");
                 current_kind = if is_stdlib_module(module) {
                     ImportKind::Stdlib
                 } else {
@@ -129,6 +165,13 @@ fn parse_import_groups(lines: &[&str]) -> Vec<ImportGroup> {
                 };
             }
             current_last = i;
+            // Check if this import opens a multiline block (has `(` but no closing `)`).
+            // Strip inline comments first so that `from foo import bar  # (note)`
+            // is not mistakenly treated as the start of a multiline block.
+            let line_no_comment = line.split('#').next().unwrap_or("").trim_end();
+            if line_no_comment.contains('(') && !line_no_comment.contains(')') {
+                in_multiline = true;
+            }
             continue;
         }
 
@@ -242,7 +285,13 @@ fn find_matching_from_import_line<'a>(
         if trimmed.contains('(') || trimmed.contains(')') || trimmed.contains('*') {
             continue;
         }
-        let names_part = &trimmed[prefix.len()..];
+        // Strip inline comment before processing names so that a line like
+        // `from typing import Any  # comment` doesn't include the comment text
+        // in the merged result.  Using `split('#')` is safe here because Python
+        // module names and imported identifiers are valid Python identifiers
+        // ([a-zA-Z_][a-zA-Z0-9_]*) and therefore never contain `#`.
+        let trimmed_no_comment = trimmed.split('#').next().unwrap_or("").trim_end();
+        let names_part = &trimmed_no_comment[prefix.len()..];
         let names: Vec<&str> = names_part.split(',').map(|s| s.trim()).collect();
         if names.iter().all(|n| !n.is_empty()) {
             return Some((i, names));
@@ -1174,39 +1223,72 @@ impl Backend {
 mod tests {
     use super::*;
 
-    // ── extract_top_level_module tests ────────────────────────────────────
+    // ── extract_top_level_modules tests ──────────────────────────────────
 
     #[test]
     fn test_extract_top_level_module_from_import() {
-        assert_eq!(extract_top_level_module("from typing import Any"), "typing");
+        assert_eq!(
+            extract_top_level_modules("from typing import Any"),
+            vec!["typing"]
+        );
     }
 
     #[test]
     fn test_extract_top_level_module_dotted() {
         assert_eq!(
-            extract_top_level_module("from collections.abc import Sequence"),
-            "collections"
+            extract_top_level_modules("from collections.abc import Sequence"),
+            vec!["collections"]
         );
     }
 
     #[test]
     fn test_extract_top_level_module_bare() {
-        assert_eq!(extract_top_level_module("import pathlib"), "pathlib");
+        assert_eq!(
+            extract_top_level_modules("import pathlib"),
+            vec!["pathlib"]
+        );
     }
 
     #[test]
     fn test_extract_top_level_module_bare_dotted() {
-        assert_eq!(extract_top_level_module("import os.path"), "os");
+        assert_eq!(extract_top_level_modules("import os.path"), vec!["os"]);
     }
 
     #[test]
     fn test_extract_top_level_module_bare_alias() {
-        assert_eq!(extract_top_level_module("import pathlib as pl"), "pathlib");
+        assert_eq!(
+            extract_top_level_modules("import pathlib as pl"),
+            vec!["pathlib"]
+        );
     }
 
     #[test]
     fn test_extract_top_level_module_non_import() {
-        assert_eq!(extract_top_level_module("x = 1"), "");
+        assert!(extract_top_level_modules("x = 1").is_empty());
+    }
+
+    #[test]
+    fn test_extract_top_level_module_comma_separated() {
+        assert_eq!(
+            extract_top_level_modules("import os, sys"),
+            vec!["os", "sys"]
+        );
+    }
+
+    #[test]
+    fn test_extract_top_level_module_comma_no_space() {
+        assert_eq!(
+            extract_top_level_modules("import os,sys"),
+            vec!["os", "sys"]
+        );
+    }
+
+    #[test]
+    fn test_extract_top_level_module_comma_three_modules() {
+        assert_eq!(
+            extract_top_level_modules("import os, sys, re"),
+            vec!["os", "sys", "re"]
+        );
     }
 
     // ── classify_import_statement tests ──────────────────────────────────
@@ -1236,6 +1318,14 @@ mod tests {
         assert_eq!(
             classify_import_statement("from myapp.db import Database"),
             ImportKind::ThirdParty
+        );
+    }
+
+    #[test]
+    fn test_classify_comma_separated_stdlib() {
+        assert_eq!(
+            classify_import_statement("import os, sys"),
+            ImportKind::Stdlib
         );
     }
 
@@ -1353,6 +1443,99 @@ mod tests {
         assert_eq!(groups[0].last_line, 0);
         assert_eq!(groups[1].kind, ImportKind::ThirdParty);
         assert_eq!(groups[1].first_line, 2);
+    }
+
+    #[test]
+    fn test_parse_groups_comma_separated_import_is_stdlib() {
+        let lines = vec!["import os, sys", "", "import pytest", "", "def test(): pass"];
+        let groups = parse_import_groups(&lines);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].kind, ImportKind::Stdlib);
+        assert_eq!(groups[0].first_line, 0);
+        assert_eq!(groups[0].last_line, 0);
+        assert_eq!(groups[1].kind, ImportKind::ThirdParty);
+    }
+
+    #[test]
+    fn test_parse_groups_multiline_import_single_group() {
+        // A multiline `from liba import (...)` spanning 4 lines must produce
+        // one group whose `last_line` is the closing `)` line.
+        let lines = vec![
+            "from liba import (",
+            "    moda,",
+            "    modb",
+            ")",
+        ];
+        let groups = parse_import_groups(&lines);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].first_line, 0);
+        assert_eq!(groups[0].last_line, 3);
+        assert_eq!(groups[0].kind, ImportKind::ThirdParty);
+    }
+
+    #[test]
+    fn test_parse_groups_multiline_import_followed_by_third_party() {
+        // Multiline import, blank line, then a third-party import — two groups.
+        let lines = vec![
+            "from liba import (",
+            "    moda,",
+            "    modb",
+            ")",
+            "",
+            "import pytest",
+            "",
+            "def test(): pass",
+        ];
+        let groups = parse_import_groups(&lines);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].first_line, 0);
+        assert_eq!(groups[0].last_line, 3);
+        assert_eq!(groups[1].first_line, 5);
+        assert_eq!(groups[1].last_line, 5);
+        assert_eq!(groups[1].kind, ImportKind::ThirdParty);
+    }
+
+    #[test]
+    fn test_parse_groups_multiline_stdlib_then_third_party() {
+        // Multiline stdlib import, blank line, third-party import — two groups.
+        let lines = vec![
+            "from typing import (",
+            "    Any,",
+            "    Optional,",
+            ")",
+            "",
+            "import pytest",
+            "",
+            "def test(): pass",
+        ];
+        let groups = parse_import_groups(&lines);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].kind, ImportKind::Stdlib);
+        assert_eq!(groups[0].first_line, 0);
+        assert_eq!(groups[0].last_line, 3);
+        assert_eq!(groups[1].kind, ImportKind::ThirdParty);
+        assert_eq!(groups[1].first_line, 5);
+        assert_eq!(groups[1].last_line, 5);
+    }
+
+    #[test]
+    fn test_parse_groups_inline_multiline_import() {
+        // `from typing import (Any,\n    Optional)` — opening and closing parens
+        // on different lines, with a name on the opening line.
+        let lines = vec![
+            "from typing import (Any,",
+            "    Optional)",
+            "",
+            "import pytest",
+        ];
+        let groups = parse_import_groups(&lines);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].kind, ImportKind::Stdlib);
+        assert_eq!(groups[0].first_line, 0);
+        assert_eq!(groups[0].last_line, 1);
+        assert_eq!(groups[1].kind, ImportKind::ThirdParty);
+        assert_eq!(groups[1].first_line, 3);
+        assert_eq!(groups[1].last_line, 3);
     }
 
     // ── kind_requested tests ─────────────────────────────────────────────
@@ -1484,6 +1667,14 @@ mod tests {
     }
 
     #[test]
+    fn test_find_matching_line_skips_inline_multiline() {
+        // `from typing import (Any,\n    Optional)` — opening paren on first line
+        // means the line is skipped even though it contains names.
+        let lines = vec!["from typing import (Any,", "    Optional)"];
+        assert_eq!(find_matching_from_import_line(&lines, "typing"), None);
+    }
+
+    #[test]
     fn test_find_matching_line_skips_star() {
         let lines = vec!["from typing import *"];
         assert_eq!(find_matching_from_import_line(&lines, "typing"), None);
@@ -1498,6 +1689,36 @@ mod tests {
             "    from typing import Any",
         ];
         assert_eq!(find_matching_from_import_line(&lines, "typing"), None);
+    }
+
+    #[test]
+    fn test_find_matching_line_with_inline_comment() {
+        // Inline comment must be stripped; names must NOT include comment text.
+        let lines = vec!["from typing import Any  # comment"];
+        let result = find_matching_from_import_line(&lines, "typing");
+        assert_eq!(result, Some((0, vec!["Any"])));
+    }
+
+    #[test]
+    fn test_find_matching_line_multi_name_with_inline_comment() {
+        // Comment stripped from a multi-name import.
+        let lines = vec!["from os import path, getcwd  # needed"];
+        let result = find_matching_from_import_line(&lines, "os");
+        assert_eq!(result, Some((0, vec!["path", "getcwd"])));
+    }
+
+    #[test]
+    fn test_find_matching_line_multi_name_from_import() {
+        let lines = vec!["from os import path, othermodule"];
+        let result = find_matching_from_import_line(&lines, "os");
+        assert_eq!(result, Some((0, vec!["path", "othermodule"])));
+    }
+
+    #[test]
+    fn test_find_matching_line_aliases_preserved() {
+        let lines = vec!["from os import path as p, getcwd as cwd"];
+        let result = find_matching_from_import_line(&lines, "os");
+        assert_eq!(result, Some((0, vec!["path as p", "getcwd as cwd"])));
     }
 
     // ── import_sort_key tests ────────────────────────────────────────────
@@ -1604,6 +1825,73 @@ mod tests {
             .collect();
         assert_eq!(import_edits.len(), 1);
         assert_eq!(import_edits[0].new_text, "from pathlib import Path\n");
+    }
+
+    #[test]
+    fn test_build_import_edits_merge_into_multi_name_existing() {
+        // Merging a new name into `from os import path, othermodule` — result
+        // must be sorted and deduplicated.
+        let lines = vec!["from os import path, othermodule", "", "def test(): pass"];
+        let spec = TypeImportSpec {
+            check_name: "getcwd".to_string(),
+            import_statement: "from os import getcwd".to_string(),
+        };
+        let existing: HashSet<String> = HashSet::new();
+        let edits = build_import_edits(&lines, &[&spec], &existing);
+
+        assert_eq!(edits.len(), 1);
+        assert_eq!(
+            edits[0].new_text,
+            "from os import getcwd, othermodule, path"
+        );
+    }
+
+    #[test]
+    fn test_build_import_edits_merge_strips_comment() {
+        // Merging into `from typing import Any  # needed for X` must strip the
+        // comment so the merged line doesn't contain `# needed for X`.
+        let lines = vec![
+            "from typing import Any  # needed for X",
+            "",
+            "def test(): pass",
+        ];
+        let spec = TypeImportSpec {
+            check_name: "Optional".to_string(),
+            import_statement: "from typing import Optional".to_string(),
+        };
+        let existing: HashSet<String> = HashSet::new();
+        let edits = build_import_edits(&lines, &[&spec], &existing);
+
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].new_text, "from typing import Any, Optional");
+        assert!(
+            !edits[0].new_text.contains('#'),
+            "merged line must not contain the original comment"
+        );
+    }
+
+    #[test]
+    fn test_build_import_edits_multiline_import_new_line_inserted() {
+        // When `find_matching_from_import_line` skips a multiline import (due to
+        // `(`), a new line must be inserted rather than merged.
+        let lines = vec![
+            "from typing import (",
+            "    Any,",
+            "    Optional,",
+            ")",
+            "",
+            "def test(): pass",
+        ];
+        let spec = TypeImportSpec {
+            check_name: "Union".to_string(),
+            import_statement: "from typing import Union".to_string(),
+        };
+        let existing: HashSet<String> = HashSet::new();
+        let edits = build_import_edits(&lines, &[&spec], &existing);
+
+        // No merge possible — a new line should be inserted.
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].new_text, "from typing import Union\n");
     }
 
     // ── isort-group-aware insertion tests ─────────────────────────────────
