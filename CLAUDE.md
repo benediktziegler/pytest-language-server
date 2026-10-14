@@ -31,6 +31,8 @@ src/
 │   │                       #   parse_import_layout(), classify_import_statement(),
 │   │                       #   adapt_type_for_consumer(), import_sort_key(), find_sorted_insert_position()
 │   ├── imports.rs          # Import handling, is_stdlib_module(), build_name_to_import_map(), file_path_to_module_path()
+│   ├── pytest_api.rs       # PytestPublicApi (pytest/__init__.py re-exports),
+│   │                       #   publicize_pytest_types(), FixtureDatabase::adapt_return_type_for_consumer()
 │   ├── resolver.rs         # Fixture resolution with pytest priority rules
 │   ├── scanner.rs          # Workspace + venv scanning
 │   └── cli.rs              # CLI commands (fixtures list/unused)
@@ -82,6 +84,15 @@ hint, so the displayed type matches the consumer file's import style:
 - If the consumer has `from pathlib import Path`, the hint shows `: Path` not `: pathlib.Path`.
 - If the consumer has `import pathlib`, the hint shows `: pathlib.Path` not `: Path`.
 The returned `Vec<TypeImportSpec>` is discarded — hints are display-only.
+
+### `_pytest.*` → public `pytest` mapping
+`FixtureDatabase::adapt_return_type_for_consumer()` (in `pytest_api.rs`) is the single entry point
+code actions and inlay hints use: it first rewrites private `_pytest.*` specs/dotted references to
+the public `pytest` API (`publicize_pytest_types`), then calls `adapt_type_for_consumer`.
+The mapping is learned by `load_pytest_public_api()` from the venv's `pytest/__init__.py` (called in
+`scan_pytest_internal_fixtures`), without it `_pytest` imports are left untouched. Rewriting happens at **consumption
+time**; stored `FixtureDefinition`s keep their original `_pytest` specs because workspace files are
+analyzed before the venv scan.
 
 ### `FixtureDatabase::get_name_to_import_map()`
 Builds (and caches by content hash) a `HashMap<String, TypeImportSpec>` for a file's imports.

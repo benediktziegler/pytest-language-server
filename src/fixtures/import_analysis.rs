@@ -577,7 +577,7 @@ fn top_level_module(line: &str) -> Option<&str> {
 
 /// Split `"from X import Y"` into `Some(("X", "Y"))`, or return `None` for
 /// bare `import X` statements and other non-matching strings.
-fn split_from_import(statement: &str) -> Option<(&str, &str)> {
+pub(crate) fn split_from_import(statement: &str) -> Option<(&str, &str)> {
     let rest = statement.strip_prefix("from ")?;
     let (module, rest) = rest.split_once(" import ")?;
     let module = module.trim();

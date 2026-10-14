@@ -8580,3 +8580,233 @@ def test_something(renamed_ü):
     let edits = edits.into_values().next().expect("one file of edits");
     assert_eq!(apply_text_edits(content, &edits), expected);
 }
+
+// ── `_pytest.*` return types are rewritten to the public `pytest` API ─────
+
+/// Analyze `conftest` + `consumer` under a fresh temp dir and return the
+/// consumer content after applying the first code action of `kind`.
+///
+/// `cursor` is the LSP position used as the request range; `diag_for` makes
+/// the helper attach an `undeclared-fixture` diagnostic for that fixture.
+async fn apply_first_action_of_kind(
+    tag: &str,
+    conftest: &str,
+    consumer: &str,
+    kind: CodeActionKind,
+    cursor: Position,
+    undeclared: bool,
+    learn_mapping: bool,
+) -> String {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = Arc::new(FixtureDatabase::new());
+    if learn_mapping {
+        learn_pytest_public_api(&db);
+    }
+    let dir = std::env::temp_dir().join(tag);
+    db.analyze_file(dir.join("conftest.py"), conftest);
+    let test_path = dir.join("test_example.py");
+    db.analyze_file(test_path.clone(), consumer);
+
+    let diagnostics = if undeclared {
+        let fixtures = db.get_undeclared_fixtures(&test_path);
+        assert_eq!(fixtures.len(), 1, "expected one undeclared fixture");
+        let fix = &fixtures[0];
+        let line = (fix.line - 1) as u32;
+        vec![Diagnostic {
+            range: Range {
+                start: Position {
+                    line,
+                    character: fix.start_char as u32,
+                },
+                end: Position {
+                    line,
+                    character: fix.end_char as u32,
+                },
+            },
+            severity: Some(DiagnosticSeverity::WARNING),
+            code: Some(NumberOrString::String("undeclared-fixture".to_string())),
+            source: Some("pytest-lsp".to_string()),
+            message: format!("Fixture '{}' is used but not declared", fix.name),
+            ..Default::default()
+        }]
+    } else {
+        vec![]
+    };
+
+    let backend = make_backend_with_db(db);
+    let params = CodeActionParams {
+        text_document: TextDocumentIdentifier {
+            uri: Uri::from_file_path(&test_path).unwrap(),
+        },
+        range: Range {
+            start: cursor,
+            end: cursor,
+        },
+        context: CodeActionContext {
+            diagnostics,
+            only: Some(vec![kind.clone()]),
+            trigger_kind: None,
+        },
+        work_done_progress_params: WorkDoneProgressParams {
+            work_done_token: None,
+        },
+        partial_result_params: PartialResultParams {
+            partial_result_token: None,
+        },
+    };
+
+    let actions = backend
+        .handle_code_action(params)
+        .await
+        .unwrap()
+        .expect("should return code actions");
+    let action = actions
+        .iter()
+        .find_map(|a| match a {
+            CodeActionOrCommand::CodeAction(ca) if ca.kind.as_ref() == Some(&kind) => Some(ca),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no {:?} action in {:?}", kind, actions));
+    let changes = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .expect("action should carry edits");
+    let edits: Vec<TextEdit> = changes.values().flatten().cloned().collect();
+    apply_text_edits(consumer, &edits)
+}
+
+/// A representative `pytest/__init__.py`, as read from the venv.
+const PYTEST_INIT: &str = "from _pytest.capture import CaptureFixture\nfrom _pytest.monkeypatch import MonkeyPatch\n__all__ = [\"CaptureFixture\", \"MonkeyPatch\"]\n";
+
+/// Give `db` the `_pytest.*` → `pytest.*` mapping a venv scan would learn.
+fn learn_pytest_public_api(db: &pytest_language_server::FixtureDatabase) {
+    use pytest_language_server::fixtures::pytest_api::PytestPublicApi;
+    *db.pytest_public_api.write().unwrap() = Some(Arc::new(
+        PytestPublicApi::from_init_source(PYTEST_INIT).unwrap(),
+    ));
+}
+
+const MONKEYPATCH_CONFTEST: &str = "import pytest\nfrom _pytest.monkeypatch import MonkeyPatch\n\n@pytest.fixture\ndef mp() -> MonkeyPatch:\n    return MonkeyPatch()\n";
+
+fn pos(line: u32, character: u32) -> Position {
+    Position { line, character }
+}
+
+#[tokio::test]
+async fn test_fix_all_uses_public_pytest_import_for_private_type() {
+    let out = apply_first_action_of_kind(
+        "test_pytest_pub_fixall",
+        MONKEYPATCH_CONFTEST,
+        "def test_it(mp):\n    pass\n",
+        CodeActionKind::from("source.fixAll.pytest-ls"),
+        pos(0, 0),
+        false,
+        true,
+    )
+    .await;
+
+    assert!(out.contains("from pytest import MonkeyPatch"), "{out}");
+    assert!(out.contains("def test_it(mp: MonkeyPatch)"), "{out}");
+    assert!(!out.contains("_pytest"), "{out}");
+}
+
+#[tokio::test]
+async fn test_fix_all_reuses_consumer_import_pytest() {
+    let out = apply_first_action_of_kind(
+        "test_pytest_pub_fixall_bare",
+        MONKEYPATCH_CONFTEST,
+        "import pytest\n\n\ndef test_it(mp):\n    pass\n",
+        CodeActionKind::from("source.fixAll.pytest-ls"),
+        pos(0, 0),
+        false,
+        true,
+    )
+    .await;
+
+    assert!(out.contains("def test_it(mp: pytest.MonkeyPatch)"), "{out}");
+    assert_eq!(out.matches("import pytest").count(), 1, "{out}");
+    assert!(!out.contains("_pytest"), "{out}");
+}
+
+#[tokio::test]
+async fn test_cursor_action_uses_public_pytest_import_for_private_type() {
+    let out = apply_first_action_of_kind(
+        "test_pytest_pub_cursor",
+        MONKEYPATCH_CONFTEST,
+        "def test_it(mp):\n    pass\n",
+        CodeActionKind::from("source.pytest-ls"),
+        pos(0, 12),
+        false,
+        true,
+    )
+    .await;
+
+    assert!(out.contains("from pytest import MonkeyPatch"), "{out}");
+    assert!(out.contains("def test_it(mp: MonkeyPatch)"), "{out}");
+    assert!(!out.contains("_pytest"), "{out}");
+}
+
+#[tokio::test]
+async fn test_quickfix_uses_public_pytest_import_for_private_type() {
+    let out = apply_first_action_of_kind(
+        "test_pytest_pub_quickfix",
+        MONKEYPATCH_CONFTEST,
+        "def test_it():\n    mp\n",
+        CodeActionKind::QUICKFIX,
+        pos(0, 0),
+        true,
+        true,
+    )
+    .await;
+
+    assert!(out.contains("from pytest import MonkeyPatch"), "{out}");
+    assert!(out.contains("mp: MonkeyPatch"), "{out}");
+    assert!(!out.contains("_pytest"), "{out}");
+}
+
+#[tokio::test]
+async fn test_fix_all_rewrites_dotted_private_reference() {
+    // `import _pytest.capture` + `_pytest.capture.CaptureFixture[str]`
+    // becomes `pytest.CaptureFixture[str]` with `import pytest`.
+    let conftest = "import pytest\nimport _pytest.capture\n\n@pytest.fixture\ndef cap() -> _pytest.capture.CaptureFixture[str]:\n    ...\n";
+    let out = apply_first_action_of_kind(
+        "test_pytest_pub_dotted",
+        conftest,
+        "def test_it(cap):\n    pass\n",
+        CodeActionKind::from("source.fixAll.pytest-ls"),
+        pos(0, 0),
+        false,
+        true,
+    )
+    .await;
+
+    assert!(out.contains("import pytest"), "{out}");
+    assert!(
+        out.contains("def test_it(cap: pytest.CaptureFixture[str])"),
+        "{out}"
+    );
+    assert!(!out.contains("_pytest"), "{out}");
+}
+
+#[tokio::test]
+async fn test_fix_all_keeps_private_import_when_pytest_mapping_unknown() {
+    // No venv scan → no mapping learned → the `_pytest` import is used as-is.
+    let out = apply_first_action_of_kind(
+        "test_pytest_pub_unknown",
+        MONKEYPATCH_CONFTEST,
+        "def test_it(mp):\n    pass\n",
+        CodeActionKind::from("source.fixAll.pytest-ls"),
+        pos(0, 0),
+        false,
+        false,
+    )
+    .await;
+
+    assert!(
+        out.contains("from _pytest.monkeypatch import MonkeyPatch"),
+        "{out}"
+    );
+    assert!(out.contains("def test_it(mp: MonkeyPatch)"), "{out}");
+}

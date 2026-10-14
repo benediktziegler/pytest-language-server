@@ -15332,3 +15332,148 @@ fn test_explicit_then_star_import_keeps_transitive_fixtures() {
         "star import must still surface module_a's transitive re-exports"
     );
 }
+
+// ── `_pytest.*` return types are mapped to the public `pytest` API ─────────
+
+/// Build `<tmp>/.venv/lib/python3.11/site-packages` with a fake `_pytest`
+/// package, optionally a `pytest/__init__.py`, and scan it.  Returns the
+/// tempdir guard and the populated database.
+fn scan_fake_venv_with_pytest(
+    pytest_init: Option<&str>,
+    extra_internal: &[(&str, &str)],
+) -> (tempfile::TempDir, FixtureDatabase) {
+    let temp = tempfile::tempdir().unwrap();
+    let site_packages = temp
+        .path()
+        .join(".venv")
+        .join("lib")
+        .join("python3.11")
+        .join("site-packages");
+    let internal = site_packages.join("_pytest");
+    std::fs::create_dir_all(&internal).unwrap();
+    std::fs::write(internal.join("__init__.py"), b"").unwrap();
+    std::fs::write(
+        internal.join("monkeypatch.py"),
+        "from typing import Generator\n\nimport pytest\n\n\nclass MonkeyPatch:\n    pass\n\n\n@pytest.fixture\ndef monkeypatch() -> Generator[MonkeyPatch, None, None]:\n    yield MonkeyPatch()\n",
+    )
+    .unwrap();
+    for (name, body) in extra_internal {
+        std::fs::write(internal.join(name), body).unwrap();
+    }
+    if let Some(init) = pytest_init {
+        let public = site_packages.join("pytest");
+        std::fs::create_dir_all(&public).unwrap();
+        std::fs::write(public.join("__init__.py"), init).unwrap();
+    }
+
+    let db = FixtureDatabase::new();
+    db.scan_workspace(temp.path());
+    (temp, db)
+}
+
+fn first_definition(db: &FixtureDatabase, name: &str) -> pytest_language_server::FixtureDefinition {
+    db.definitions
+        .get(name)
+        .unwrap_or_else(|| panic!("fixture `{name}` not found"))
+        .iter()
+        .next()
+        .cloned()
+        .unwrap()
+}
+
+#[test]
+#[timeout(30000)]
+fn test_private_pytest_type_publicized_from_venv_init() {
+    let (_temp, db) = scan_fake_venv_with_pytest(
+        Some("from _pytest.monkeypatch import MonkeyPatch\n\n__all__ = [\"MonkeyPatch\"]\n"),
+        &[],
+    );
+
+    let def = first_definition(&db, "monkeypatch");
+    // Analysis keeps the original private spec …
+    assert!(
+        def.return_type_imports
+            .iter()
+            .any(|s| s.import_statement == "from _pytest.monkeypatch import MonkeyPatch"),
+        "stored specs must stay private: {:?}",
+        def.return_type_imports
+    );
+
+    // … and the public spec is produced at consumption time.
+    let rt = def.return_type.as_deref().unwrap();
+    let (adapted, specs) =
+        db.adapt_return_type_for_consumer(rt, &def.return_type_imports, &Default::default());
+    assert!(adapted.contains("MonkeyPatch"), "{adapted}");
+    assert!(
+        specs
+            .iter()
+            .any(|s| s.import_statement == "from pytest import MonkeyPatch"),
+        "{specs:?}"
+    );
+    assert!(
+        specs
+            .iter()
+            .all(|s| !s.import_statement.contains("_pytest")),
+        "{specs:?}"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_private_pytest_type_kept_when_pytest_init_missing() {
+    // No `pytest/__init__.py` in the venv → nothing learned, `_pytest` imports stay.
+    let (_temp, db) = scan_fake_venv_with_pytest(None, &[]);
+
+    let def = first_definition(&db, "monkeypatch");
+    let rt = def.return_type.as_deref().unwrap();
+    let (_, specs) =
+        db.adapt_return_type_for_consumer(rt, &def.return_type_imports, &Default::default());
+    assert!(
+        specs
+            .iter()
+            .any(|s| s.import_statement == "from _pytest.monkeypatch import MonkeyPatch"),
+        "{specs:?}"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_private_pytest_type_not_publicized_when_pytest_does_not_export_it() {
+    // A readable `pytest/__init__.py` that does not re-export MonkeyPatch is
+    // authoritative: the private import is left alone rather than guessed.
+    let (_temp, db) = scan_fake_venv_with_pytest(Some("from _pytest.other import Thing\n"), &[]);
+
+    let def = first_definition(&db, "monkeypatch");
+    let rt = def.return_type.as_deref().unwrap();
+    let (_, specs) =
+        db.adapt_return_type_for_consumer(rt, &def.return_type_imports, &Default::default());
+    assert!(
+        specs
+            .iter()
+            .any(|s| s.import_statement == "from _pytest.monkeypatch import MonkeyPatch"),
+        "{specs:?}"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_private_pytest_type_publicized_for_dotted_reference_in_user_conftest() {
+    let (temp, db) =
+        scan_fake_venv_with_pytest(Some("from _pytest.capture import CaptureFixture\n"), &[]);
+
+    let conftest = temp.path().join("conftest.py");
+    db.analyze_file(
+        conftest,
+        "import pytest\nimport _pytest.capture\n\n@pytest.fixture\ndef cap() -> _pytest.capture.CaptureFixture[str]:\n    ...\n",
+    );
+
+    let def = first_definition(&db, "cap");
+    let rt = def.return_type.as_deref().unwrap();
+    let (adapted, specs) =
+        db.adapt_return_type_for_consumer(rt, &def.return_type_imports, &Default::default());
+    assert_eq!(adapted, "pytest.CaptureFixture[str]");
+    assert!(
+        specs.iter().any(|s| s.import_statement == "import pytest"),
+        "{specs:?}"
+    );
+}

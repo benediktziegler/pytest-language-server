@@ -1597,6 +1597,86 @@ async fn test_inlay_hint_adapts_dotted_type_to_consumer_from_import() {
     }
 }
 
+// ── `_pytest.*` types are shown via the public `pytest` API ───────────────
+
+/// Give `db` the `_pytest.*` -> `pytest.*` mapping a venv scan would learn.
+fn learn_pytest_public_api(db: &FixtureDatabase) {
+    use pytest_language_server::fixtures::pytest_api::PytestPublicApi;
+    let init = "from _pytest.monkeypatch import MonkeyPatch\n__all__ = [\"MonkeyPatch\"]\n";
+    *db.pytest_public_api.write().unwrap() =
+        Some(Arc::new(PytestPublicApi::from_init_source(init).unwrap()));
+}
+
+const PRIVATE_MONKEYPATCH_CONFTEST: &str = "import pytest\nfrom _pytest.monkeypatch import MonkeyPatch\n\n@pytest.fixture\ndef mp() -> MonkeyPatch:\n    return MonkeyPatch()\n";
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_inlay_hint_shows_public_name_for_private_pytest_type() {
+    let db = Arc::new(FixtureDatabase::new());
+    learn_pytest_public_api(&db);
+    let backend = make_backend_with_db(Arc::clone(&db));
+
+    open_file(
+        &backend,
+        turi("test_ih_pub", "conftest.py"),
+        PRIVATE_MONKEYPATCH_CONFTEST,
+    )
+    .await;
+    open_file(
+        &backend,
+        turi("test_ih_pub", "test_foo.py"),
+        "def test_foo(mp):\n    pass\n",
+    )
+    .await;
+
+    let hints = get_hints(
+        &backend,
+        turi("test_ih_pub", "test_foo.py"),
+        rng(0, 0, 10, 0),
+    )
+    .await;
+
+    assert_eq!(hints.len(), 1, "Should return one hint");
+    match &hints[0].label {
+        InlayHintLabel::String(label) => assert_eq!(label, ": MonkeyPatch"),
+        _ => panic!("Expected String label"),
+    }
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_inlay_hint_private_pytest_type_follows_consumer_import_pytest() {
+    let db = Arc::new(FixtureDatabase::new());
+    learn_pytest_public_api(&db);
+    let backend = make_backend_with_db(Arc::clone(&db));
+
+    open_file(
+        &backend,
+        turi("test_ih_pub_bare", "conftest.py"),
+        PRIVATE_MONKEYPATCH_CONFTEST,
+    )
+    .await;
+    open_file(
+        &backend,
+        turi("test_ih_pub_bare", "test_foo.py"),
+        "import pytest\n\ndef test_foo(mp):\n    pass\n",
+    )
+    .await;
+
+    let hints = get_hints(
+        &backend,
+        turi("test_ih_pub_bare", "test_foo.py"),
+        rng(0, 0, 10, 0),
+    )
+    .await;
+
+    assert_eq!(hints.len(), 1, "Should return one hint");
+    match &hints[0].label {
+        InlayHintLabel::String(label) => assert_eq!(label, ": pytest.MonkeyPatch"),
+        _ => panic!("Expected String label"),
+    }
+}
+
 // ── Multiple fixtures: only typed ones get hints ──────────────────────────
 
 #[tokio::test]

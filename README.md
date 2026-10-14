@@ -185,6 +185,11 @@ Intelligent code actions for pytest fixtures, covering quick fixes, type annotat
 - Collects and deduplicates all required imports across all fixtures
 - Great for bringing an entire test file up to date in one click
 
+**Public pytest API for built-in fixture types**:
+- Types from private `_pytest.*` modules (e.g. `MonkeyPatch`, `CaptureFixture`, `FixtureRequest`) are shown and inserted via the public `pytest` API: `from pytest import MonkeyPatch`, never `from _pytest.monkeypatch import MonkeyPatch`
+- Applies to code actions and inlay hints; if the file already has `import pytest`, the type is written as `pytest.MonkeyPatch` with no new import
+- The mapping is read from the installed pytest's `pytest/__init__.py`; when pytest cannot be found in the virtual environment, the `_pytest` imports are left as they are
+
 **isort/ruff-Aware Import Insertion** (best-effort):
 - Attempts to place new imports into the correct **isort group** (stdlib vs third-party) with proper blank-line separators
 - When the file already has `from X import Y` for the same module, attempts to **merge** the new name into the existing line (sorted alphabetically) instead of adding a duplicate
@@ -499,6 +504,8 @@ Code actions are available in three forms:
 2. **Import map lookup** — if the fixture file imports the name (e.g. `from pathlib import Path`), the same import statement is reused (relative imports are resolved to absolute form)
 3. **Locally defined names** — if the name is defined in the fixture file itself (e.g. a class in `conftest.py`) but not imported from elsewhere, an import is generated from the file's module path (e.g. `from tests.conftest import MyClass`)
 4. **Unknown names** — skipped; no import is generated
+
+After resolution, any import from a private `_pytest.*` module is rewritten to its public `pytest` equivalent (learned from the installed pytest's `pytest/__init__.py`). Dotted references such as `_pytest.capture.CaptureFixture[str]` become `pytest.CaptureFixture[str]` plus `import pytest`. Names pytest does not re-export are left untouched.
 
 > **Note:** Module path resolution for locally defined names depends on `__init__.py` files on disk. The server automatically watches for `__init__.py` create/delete events and re-analyzes affected fixture files, so module paths stay up to date without manual intervention.
 

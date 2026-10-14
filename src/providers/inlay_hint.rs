@@ -3,12 +3,15 @@
 //! Shows fixture return types inline for fixture parameters in test functions
 //! when the fixture has an explicit return type annotation.
 //!
-//! The displayed type is adapted to the consumer file's import context via
-//! [`adapt_type_for_consumer`]: if the consumer already has `from pathlib import Path`
-//! the hint shows `Path` rather than `pathlib.Path`, and vice versa.
+//! The displayed type is first mapped from private `_pytest.*` names to the
+//! public `pytest` API, then adapted to the consumer file's import context via
+//! [`FixtureDatabase::adapt_return_type_for_consumer`]: if the consumer already
+//! has `from pathlib import Path` the hint shows `Path` rather than
+//! `pathlib.Path`, and vice versa.
+//!
+//! [`FixtureDatabase::adapt_return_type_for_consumer`]: crate::fixtures::FixtureDatabase::adapt_return_type_for_consumer
 
 use super::Backend;
-use crate::fixtures::import_analysis::adapt_type_for_consumer;
 use crate::fixtures::string_utils::parameter_has_annotation;
 use crate::fixtures::FixtureDefinition;
 use std::collections::HashMap;
@@ -119,12 +122,13 @@ impl Backend {
                 // Safety: fixture_map only contains defs with return_type.is_some()
                 let return_type = def.return_type.as_deref().unwrap();
 
-                // Adapt the type string to the consumer's import style.
+                // Map `_pytest.*` names to the public `pytest` API, then adapt
+                // the type string to the consumer's import style.
                 // e.g. if the consumer has `from pathlib import Path` already,
                 // show `Path` instead of `pathlib.Path`, and vice versa.
                 // The returned import specs are discarded — inlay hints are
                 // display-only and do not insert imports.
-                let (display_type, _) = adapt_type_for_consumer(
+                let (display_type, _) = self.fixture_db.adapt_return_type_for_consumer(
                     return_type,
                     &def.return_type_imports,
                     &consumer_import_map,

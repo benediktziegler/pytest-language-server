@@ -749,6 +749,9 @@ impl FixtureDatabase {
             "Scanning pytest internal fixtures in: {:?}",
             pytest_internal
         );
+        // Learn which `_pytest.*` names pytest re-exports publicly so code
+        // actions / inlay hints can reference `pytest.X` instead.
+        self.load_pytest_public_api(site_packages);
         self.scan_plugin_directory(&pytest_internal);
 
         // `request` is not defined via @pytest.fixture anywhere in _pytest/ —

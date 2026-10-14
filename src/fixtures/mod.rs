@@ -12,6 +12,7 @@ pub mod decorators; // Public for testing
 mod docstring;
 pub mod import_analysis;
 mod imports;
+pub mod pytest_api;
 mod resolver;
 mod scanner;
 pub(crate) mod string_utils; // pub(crate) for inlay_hint provider access
@@ -151,6 +152,11 @@ pub struct FixtureDatabase {
     ///
     /// Bounded implicitly: see [`NameImportMapCacheEntry`] for the eviction strategy.
     pub name_import_map_cache: Arc<DashMap<PathBuf, NameImportMapCacheEntry>>,
+    /// Private `_pytest.*` → public `pytest.*` name mapping learned from the
+    /// venv's `pytest/__init__.py`.  `None` until a venv scan finds pytest;
+    /// readers then leave `_pytest` imports untouched.
+    /// See [`pytest_api`].
+    pub pytest_public_api: Arc<std::sync::RwLock<Option<Arc<pytest_api::PytestPublicApi>>>>,
 }
 
 impl Default for FixtureDatabase {
@@ -183,6 +189,7 @@ impl FixtureDatabase {
             workspace_root: Arc::new(std::sync::Mutex::new(None)),
             plugin_fixture_files: Arc::new(DashMap::new()),
             name_import_map_cache: Arc::new(DashMap::new()),
+            pytest_public_api: Arc::new(std::sync::RwLock::new(None)),
         }
     }
 

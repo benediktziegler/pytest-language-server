@@ -30,9 +30,8 @@
 
 use super::Backend;
 use crate::fixtures::import_analysis::{
-    adapt_type_for_consumer, can_merge_into, classify_import_statement,
-    find_sorted_insert_position, import_line_sort_key, import_sort_key, parse_import_layout,
-    ImportGroup, ImportKind, ImportLayout,
+    can_merge_into, classify_import_statement, find_sorted_insert_position, import_line_sort_key,
+    import_sort_key, parse_import_layout, ImportGroup, ImportKind, ImportLayout,
 };
 use crate::fixtures::string_utils::parameter_has_annotation;
 use crate::fixtures::types::TypeImportSpec;
@@ -509,11 +508,12 @@ impl Backend {
                 let (type_suffix, return_type_imports) = match &fixture_def {
                     Some(def) => {
                         if let Some(rt) = &def.return_type {
-                            let (adapted, remaining) = adapt_type_for_consumer(
-                                rt,
-                                &def.return_type_imports,
-                                &consumer_import_map,
-                            );
+                            let (adapted, remaining) =
+                                self.fixture_db.adapt_return_type_for_consumer(
+                                    rt,
+                                    &def.return_type_imports,
+                                    &consumer_import_map,
+                                );
                             (format!(": {}", adapted), remaining)
                         } else {
                             (String::new(), vec![])
@@ -661,12 +661,14 @@ impl Backend {
                             // so every def stored in the map has return_type.is_some().
                             let return_type = def.return_type.as_deref().unwrap();
 
-                            // Adapt dotted types to consumer's import context.
-                            let (adapted_type, adapted_imports) = adapt_type_for_consumer(
-                                return_type,
-                                &def.return_type_imports,
-                                &consumer_import_map,
-                            );
+                            // Map private `_pytest` names to the public `pytest`
+                            // API, then adapt to the consumer's import context.
+                            let (adapted_type, adapted_imports) =
+                                self.fixture_db.adapt_return_type_for_consumer(
+                                    return_type,
+                                    &def.return_type_imports,
+                                    &consumer_import_map,
+                                );
 
                             info!(
                                 "Cursor-based annotation action for '{}': {}",
@@ -743,12 +745,14 @@ impl Backend {
                             // so every def stored in the map has return_type.is_some().
                             let return_type = def.return_type.as_deref().unwrap();
 
-                            // Adapt dotted types to consumer's import context.
-                            let (adapted_type, adapted_imports) = adapt_type_for_consumer(
-                                return_type,
-                                &def.return_type_imports,
-                                &consumer_import_map,
-                            );
+                            // Map private `_pytest` names to the public `pytest`
+                            // API, then adapt to the consumer's import context.
+                            let (adapted_type, adapted_imports) =
+                                self.fixture_db.adapt_return_type_for_consumer(
+                                    return_type,
+                                    &def.return_type_imports,
+                                    &consumer_import_map,
+                                );
 
                             // Collect import specs (build_import_edits handles
                             // deduplication internally).
