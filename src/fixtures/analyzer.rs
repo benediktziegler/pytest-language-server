@@ -105,14 +105,17 @@ impl FixtureDatabase {
             self.imports
                 .insert(file_path.clone(), module_level_names.clone());
 
-            // Build a name→TypeImportSpec map from every import statement in the file.
-            // Used during fixture analysis to resolve return-type annotation imports,
-            // and cached for code-action and inlay-hint requests.
-            let import_map = self.build_name_to_import_map(&module.body, &file_path);
+            // Cache the consumer-side import map for code-action and inlay-hint
+            // requests that use this file as a consumer.
+            let consumer_import_map = self.build_consumer_import_map(&module.body, &file_path);
             self.name_import_map_cache.insert(
                 file_path.clone(),
-                (content_hash, std::sync::Arc::new(import_map.clone())),
+                (content_hash, std::sync::Arc::new(consumer_import_map)),
             );
+
+            // For resolving return-type annotation imports, `if TYPE_CHECKING:`
+            // imports count as well.
+            let import_map = self.build_name_to_import_map(&module.body, &file_path, true);
 
             // Collect type aliases so that `-> MyType` can be expanded to the
             // underlying type before import resolution.

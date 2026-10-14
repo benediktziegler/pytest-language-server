@@ -8810,3 +8810,156 @@ async fn test_fix_all_keeps_private_import_when_pytest_mapping_unknown() {
     );
     assert!(out.contains("def test_it(mp: MonkeyPatch)"), "{out}");
 }
+
+#[tokio::test]
+async fn test_fix_all_resolves_return_type_imported_under_type_checking() {
+    // The fixture's return type is only imported inside `if TYPE_CHECKING:`;
+    // it must still be resolved (and publicized) for the consumer.
+    let conftest = "from __future__ import annotations\n\nfrom typing import TYPE_CHECKING\n\nimport pytest\n\nif TYPE_CHECKING:\n    from _pytest.monkeypatch import MonkeyPatch\n\n\n@pytest.fixture\ndef mp() -> MonkeyPatch:\n    ...\n";
+    let out = apply_first_action_of_kind(
+        "test_pytest_pub_type_checking",
+        conftest,
+        "def test_it(mp):\n    pass\n",
+        CodeActionKind::from("source.fixAll.pytest-ls"),
+        pos(0, 0),
+        false,
+        true,
+    )
+    .await;
+
+    assert!(out.contains("from pytest import MonkeyPatch"), "{out}");
+    assert!(out.contains("def test_it(mp: MonkeyPatch)"), "{out}");
+    assert!(!out.contains("_pytest"), "{out}");
+}
+
+#[tokio::test]
+async fn test_fix_all_adds_runtime_import_when_consumer_only_imports_under_type_checking() {
+    // A consumer that imports the type only under `if TYPE_CHECKING:` (and has
+    // no `from __future__ import annotations`) still needs a runtime import.
+    let consumer = "from typing import TYPE_CHECKING\n\nif TYPE_CHECKING:\n    from pytest import MonkeyPatch\n\n\ndef test_it(mp):\n    pass\n";
+    let out = apply_first_action_of_kind(
+        "test_pytest_pub_consumer_tc",
+        MONKEYPATCH_CONFTEST,
+        consumer,
+        CodeActionKind::from("source.fixAll.pytest-ls"),
+        pos(0, 0),
+        false,
+        true,
+    )
+    .await;
+
+    assert!(
+        out.lines().any(|l| l == "from pytest import MonkeyPatch"),
+        "expected a top-level runtime import: {out}"
+    );
+}
+
+#[tokio::test]
+async fn test_fix_all_reuses_type_checking_import_with_future_annotations() {
+    // With `from __future__ import annotations` annotations are never
+    // evaluated, so a consumer's `if TYPE_CHECKING: import pytest` is enough.
+    let consumer = "from __future__ import annotations\n\nfrom typing import TYPE_CHECKING\n\nif TYPE_CHECKING:\n    import pytest\n\n\ndef test_it(mp):\n    pass\n";
+    let out = apply_first_action_of_kind(
+        "test_pytest_pub_future_tc",
+        MONKEYPATCH_CONFTEST,
+        consumer,
+        CodeActionKind::from("source.fixAll.pytest-ls"),
+        pos(0, 0),
+        false,
+        true,
+    )
+    .await;
+
+    assert!(out.contains("def test_it(mp: pytest.MonkeyPatch)"), "{out}");
+    assert_eq!(out.matches("import pytest").count(), 1, "{out}");
+    assert!(!out.contains("from pytest import"), "{out}");
+}
+
+#[tokio::test]
+async fn test_fix_all_request_reuses_type_checking_pytest_import() {
+    // `request` is synthetic (`from pytest import FixtureRequest`); a consumer
+    // with `from __future__ import annotations` + `if TYPE_CHECKING: import
+    // pytest` should get `pytest.FixtureRequest` and no new import.
+    use pytest_language_server::FixtureDatabase;
+
+    let db = Arc::new(FixtureDatabase::new());
+    db.definitions
+        .entry("request".to_string())
+        .or_default()
+        .push(pytest_language_server::FixtureDefinition {
+            name: "request".to_string(),
+            file_path: PathBuf::from("_pytest/fixtures.py"),
+            line: 1,
+            end_line: 1,
+            start_char: 0,
+            end_char: 7,
+            docstring: None,
+            return_type: Some("FixtureRequest".to_string()),
+            return_type_imports: vec![pytest_language_server::TypeImportSpec {
+                check_name: "FixtureRequest".to_string(),
+                import_statement: "from pytest import FixtureRequest".to_string(),
+            }],
+            is_third_party: true,
+            is_plugin: true,
+            dependencies: vec![],
+            scope: pytest_language_server::FixtureScope::Function,
+            yield_line: None,
+            autouse: false,
+        });
+
+    let test_path = std::env::temp_dir()
+        .join("test_req_future_tc")
+        .join("test_example.py");
+    let content = "from __future__ import annotations\n\nfrom typing import TYPE_CHECKING\n\nif TYPE_CHECKING:\n    import pytest\n\ndef test_nothing(request):\n    assert True\n";
+    db.analyze_file(test_path.clone(), content);
+
+    let backend = make_backend_with_db(db);
+    let kind = CodeActionKind::from("source.fixAll.pytest-ls");
+    let actions = backend
+        .handle_code_action(CodeActionParams {
+            text_document: TextDocumentIdentifier {
+                uri: Uri::from_file_path(&test_path).unwrap(),
+            },
+            range: Range {
+                start: pos(0, 0),
+                end: pos(0, 0),
+            },
+            context: CodeActionContext {
+                diagnostics: vec![],
+                only: Some(vec![kind.clone()]),
+                trigger_kind: None,
+            },
+            work_done_progress_params: WorkDoneProgressParams {
+                work_done_token: None,
+            },
+            partial_result_params: PartialResultParams {
+                partial_result_token: None,
+            },
+        })
+        .await
+        .unwrap()
+        .expect("should return code actions");
+    let action = actions
+        .iter()
+        .find_map(|a| match a {
+            CodeActionOrCommand::CodeAction(ca) if ca.kind.as_ref() == Some(&kind) => Some(ca),
+            _ => None,
+        })
+        .expect("fix-all action");
+    let edits: Vec<TextEdit> = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .unwrap()
+        .values()
+        .flatten()
+        .cloned()
+        .collect();
+    let out = apply_text_edits(content, &edits);
+
+    assert!(
+        out.contains("def test_nothing(request: pytest.FixtureRequest)"),
+        "{out}"
+    );
+    assert!(!out.contains("from pytest import"), "{out}");
+}

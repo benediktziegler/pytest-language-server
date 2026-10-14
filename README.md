@@ -501,7 +501,7 @@ Code actions are available in three forms:
 **Return-type resolution precedence** — when a fixture has a return type annotation (e.g. `-> Path`), the server resolves the import needed for that type using the following priority:
 
 1. **Builtin types** (`int`, `str`, `bool`, `dict`, `list`, `None`, …) — skipped, no import needed
-2. **Import map lookup** — if the fixture file imports the name (e.g. `from pathlib import Path`), the same import statement is reused (relative imports are resolved to absolute form)
+2. **Import map lookup** — if the fixture file imports the name (e.g. `from pathlib import Path`), the same import statement is reused (relative imports are resolved to absolute form); imports under `if TYPE_CHECKING:` count too
 3. **Locally defined names** — if the name is defined in the fixture file itself (e.g. a class in `conftest.py`) but not imported from elsewhere, an import is generated from the file's module path (e.g. `from tests.conftest import MyClass`)
 4. **Unknown names** — skipped; no import is generated
 

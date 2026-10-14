@@ -349,7 +349,7 @@ impl FixtureDatabase {
         let map = match self.get_parsed_ast(file_path, content) {
             Some(ast) => {
                 if let rustpython_parser::ast::Mod::Module(module) = ast.as_ref() {
-                    self.build_name_to_import_map(&module.body, file_path)
+                    self.build_consumer_import_map(&module.body, file_path)
                 } else {
                     HashMap::new()
                 }

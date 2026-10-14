@@ -849,15 +849,58 @@ impl FixtureDatabase {
     /// | `import pathlib as pl`              | `"pl"`      | `"import pathlib as pl"`       |
     /// | `from pathlib import Path`          | `"Path"`    | `"from pathlib import Path"`   |
     /// | `from pathlib import Path as P`     | `"P"`       | `"from pathlib import Path as P"` |
+    ///
+    /// Imports nested in an `if TYPE_CHECKING:` block are only included when
+    /// `include_type_checking` is set.  They are not available at runtime, so
+    /// they are right for resolving a fixture's return-type annotation (the
+    /// name still has to be imported by whoever writes the annotation) but
+    /// wrong for deciding whether a consumer file already has a usable import.
     pub(crate) fn build_name_to_import_map(
         &self,
         stmts: &[Stmt],
         fixture_file: &Path,
+        include_type_checking: bool,
     ) -> HashMap<String, TypeImportSpec> {
         let mut map = HashMap::new();
+        self.collect_name_to_import_map(stmts, fixture_file, include_type_checking, &mut map);
+        map
+    }
 
+    /// Import map for a file acting as the *consumer* of a fixture type, i.e.
+    /// the names its annotations can already use.
+    ///
+    /// `if TYPE_CHECKING:` imports only count when the file has
+    /// `from __future__ import annotations`: annotations are then never
+    /// evaluated, so a type-checking-only import is enough.  Without it the
+    /// annotation is evaluated at definition time and needs a runtime import.
+    pub(crate) fn build_consumer_import_map(
+        &self,
+        stmts: &[Stmt],
+        file: &Path,
+    ) -> HashMap<String, TypeImportSpec> {
+        self.build_name_to_import_map(stmts, file, has_future_annotations(stmts))
+    }
+
+    fn collect_name_to_import_map(
+        &self,
+        stmts: &[Stmt],
+        fixture_file: &Path,
+        include_type_checking: bool,
+        map: &mut HashMap<String, TypeImportSpec>,
+    ) {
         for stmt in stmts {
             match stmt {
+                Stmt::If(if_stmt)
+                    if include_type_checking && is_type_checking_guard(&if_stmt.test) =>
+                {
+                    self.collect_name_to_import_map(
+                        &if_stmt.body,
+                        fixture_file,
+                        include_type_checking,
+                        map,
+                    );
+                }
+
                 Stmt::Import(import_stmt) => {
                     for alias in &import_stmt.names {
                         let module = alias.name.to_string();
@@ -942,8 +985,35 @@ impl FixtureDatabase {
                 _ => {}
             }
         }
+    }
+}
 
-        map
+/// `true` if the module has a top-level `from __future__ import annotations`.
+fn has_future_annotations(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(|stmt| match stmt {
+        Stmt::ImportFrom(import_from) => {
+            import_from
+                .module
+                .as_ref()
+                .is_some_and(|m| m.as_str() == "__future__")
+                && import_from
+                    .names
+                    .iter()
+                    .any(|alias| alias.name.as_str() == "annotations")
+        }
+        _ => false,
+    })
+}
+
+/// `true` for `TYPE_CHECKING` and `<module>.TYPE_CHECKING` (e.g.
+/// `typing.TYPE_CHECKING`, `t.TYPE_CHECKING`).
+fn is_type_checking_guard(test: &Expr) -> bool {
+    match test {
+        Expr::Name(name) => name.id.as_str() == "TYPE_CHECKING",
+        Expr::Attribute(attr) => {
+            attr.attr.as_str() == "TYPE_CHECKING" && matches!(*attr.value, Expr::Name(_))
+        }
+        _ => false,
     }
 }
 
@@ -1236,5 +1306,80 @@ mod tests {
             !map.contains_key("collections.abc"),
             "dotted path must not be keyed when alias present"
         );
+    }
+
+    // ── `if TYPE_CHECKING:` imports ──────────────────────────────────────
+
+    fn build_map(source: &str, include_type_checking: bool) -> HashMap<String, TypeImportSpec> {
+        let parsed = rustpython_parser::parse(
+            source,
+            rustpython_parser::Mode::Module,
+            "test_type_checking.py",
+        )
+        .unwrap();
+        let rustpython_parser::ast::Mod::Module(module) = parsed else {
+            panic!("expected a module");
+        };
+        FixtureDatabase::new().build_name_to_import_map(
+            &module.body,
+            &PathBuf::from("/tmp/test_type_checking.py"),
+            include_type_checking,
+        )
+    }
+
+    #[test]
+    fn test_build_map_includes_type_checking_imports_when_requested() {
+        let src = "from typing import TYPE_CHECKING\n\nif TYPE_CHECKING:\n    from _pytest.monkeypatch import MonkeyPatch\n    import pathlib\n";
+        let map = build_map(src, true);
+        assert_eq!(
+            map["MonkeyPatch"].import_statement,
+            "from _pytest.monkeypatch import MonkeyPatch"
+        );
+        assert_eq!(map["pathlib"].import_statement, "import pathlib");
+    }
+
+    #[test]
+    fn test_build_map_skips_type_checking_imports_by_default() {
+        let src =
+            "from typing import TYPE_CHECKING\n\nif TYPE_CHECKING:\n    from pathlib import Path\n";
+        let map = build_map(src, false);
+        assert!(map.contains_key("TYPE_CHECKING"));
+        assert!(!map.contains_key("Path"), "{map:?}");
+    }
+
+    #[test]
+    fn test_build_map_recognises_attribute_guard() {
+        let src = "import typing\n\nif typing.TYPE_CHECKING:\n    from pathlib import Path\n";
+        assert!(build_map(src, true).contains_key("Path"));
+    }
+
+    #[test]
+    fn test_build_map_ignores_other_if_blocks_and_else_branch() {
+        let src = "import sys\n\nif sys.version_info >= (3, 9):\n    from pathlib import Path\n\nif TYPE_CHECKING:\n    pass\nelse:\n    from os import PathLike\n";
+        let map = build_map(src, true);
+        assert!(!map.contains_key("Path"), "{map:?}");
+        assert!(!map.contains_key("PathLike"), "{map:?}");
+    }
+
+    #[test]
+    fn test_consumer_map_needs_future_annotations_for_type_checking_imports() {
+        let consumer_map = |source: &str| {
+            let parsed = rustpython_parser::parse(
+                source,
+                rustpython_parser::Mode::Module,
+                "test_consumer.py",
+            )
+            .unwrap();
+            let rustpython_parser::ast::Mod::Module(module) = parsed else {
+                panic!("expected a module");
+            };
+            FixtureDatabase::new()
+                .build_consumer_import_map(&module.body, &PathBuf::from("/tmp/test_consumer.py"))
+        };
+        let guarded = "if TYPE_CHECKING:\n    import pytest\n";
+
+        let with_future = format!("from __future__ import annotations\n{guarded}");
+        assert!(consumer_map(&with_future).contains_key("pytest"));
+        assert!(!consumer_map(guarded).contains_key("pytest"));
     }
 }

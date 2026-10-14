@@ -70,7 +70,11 @@ The code action provider (`src/providers/code_action.rs`) emits three kinds:
 
 ### TypeImportSpec & Return-Type Import Resolution
 `TypeImportSpec` (in `types.rs`) captures `check_name` + `import_statement` for each type used in a fixture's return annotation. Resolved at analysis time:
-1. `build_name_to_import_map()` (in `imports.rs`) builds a name→spec map from all imports in the fixture file (including stdlib/typing)
+1. `build_name_to_import_map()` (in `imports.rs`) builds a name→spec map from all imports in the fixture file (including stdlib/typing).
+   `if TYPE_CHECKING:` imports are included for this (`include_type_checking = true`). The cached
+   consumer-side map (`build_consumer_import_map()`) only includes them when the file has
+   `from __future__ import annotations`, since otherwise they don't exist at runtime when the
+   annotation is evaluated
 2. `resolve_return_type_imports()` (in `analyzer.rs`) tokenises the return type string, skips builtins, looks up each identifier in the import map, and falls back to locally-defined names via `file_path_to_module_path()`
 3. Results are stored in `FixtureDefinition::return_type_imports` for use by code actions
 
